@@ -348,6 +348,9 @@ class Trainer:
         loss_val,
         maes_train: Dict,
         lr,
+        rel_maes_train: Optional[Dict] = None,
+        maes_val: Optional[Dict] = None,
+        rel_maes_val: Optional[Dict] = None,
     ) -> None:
         if not self.wandb_enabled:
             return
@@ -372,6 +375,36 @@ class Trainer:
                     maes_train[UPDATE_VELOCITIES_KEY]
                 )
 
+        if rel_maes_train:
+            if DISPLACEMENTS_KEY in rel_maes_train:
+                metrics["mae_pct/train/displacements"] = 100 * self._to_float(
+                    rel_maes_train[DISPLACEMENTS_KEY]
+                )
+            if UPDATE_VELOCITIES_KEY in rel_maes_train:
+                metrics["mae_pct/train/update_velocities"] = 100 * self._to_float(
+                    rel_maes_train[UPDATE_VELOCITIES_KEY]
+                )
+
+        if maes_val:
+            if DISPLACEMENTS_KEY in maes_val:
+                metrics["mae/val/displacements"] = self._to_float(
+                    maes_val[DISPLACEMENTS_KEY]
+                )
+            if UPDATE_VELOCITIES_KEY in maes_val:
+                metrics["mae/val/update_velocities"] = self._to_float(
+                    maes_val[UPDATE_VELOCITIES_KEY]
+                )
+
+        if rel_maes_val:
+            if DISPLACEMENTS_KEY in rel_maes_val:
+                metrics["mae_pct/val/displacements"] = 100 * self._to_float(
+                    rel_maes_val[DISPLACEMENTS_KEY]
+                )
+            if UPDATE_VELOCITIES_KEY in rel_maes_val:
+                metrics["mae_pct/val/update_velocities"] = 100 * self._to_float(
+                    rel_maes_val[UPDATE_VELOCITIES_KEY]
+                )
+
         if self.wandb_run:
             self.wandb_run.log(metrics, step=epoch)
 
@@ -387,12 +420,12 @@ class Trainer:
     def _compute_validation_loss(self):
         """Compute validation loss/MAEs without TensorBoard logging for WandB-only runs."""
         if not self.tensorboard_settings:
-            return None
+            return None, None, None
 
         val_cfg = self.tensorboard_settings.get("loss_validation") or {}
         data_args = val_cfg.get("data")
         if not data_args:
-            return None
+            return None, None, None
 
         batch_size = val_cfg.get("batch_size", 1)
         validation_set = AtomicGraphDataset(**data_args)
@@ -402,6 +435,10 @@ class Trainer:
         total_size = 0
         mae_disp = 0.0
         mae_vel = 0.0
+        err_disp_abs_sum = 0.0
+        err_vel_abs_sum = 0.0
+        ref_disp_abs_sum = 0.0
+        ref_vel_abs_sum = 0.0
 
         self.model.eval()
         with torch.no_grad():
@@ -420,23 +457,46 @@ class Trainer:
                 err_disp, err_vel = torch.split(
                     (predictions - reference).abs(), self.output_dimensions, dim=1
                 )
+                ref_disp, ref_vel = torch.split(
+                    reference, self.output_dimensions, dim=1
+                )
+
                 mae_disp += err_disp.mean().detach() * val_batch.num_nodes
                 mae_vel += err_vel.mean().detach() * val_batch.num_nodes
+                err_disp_abs_sum += err_disp.sum().detach()
+                err_vel_abs_sum += err_vel.sum().detach()
+                ref_disp_abs_sum += ref_disp.abs().sum().detach()
+                ref_vel_abs_sum += ref_vel.abs().sum().detach()
                 total_size += val_batch.size(0)
 
         if total_size == 0:
-            return None
+            return None, None, None
 
         loss /= total_size
         mae_disp /= total_size
         mae_vel /= total_size
 
-        return loss
+        maes = {
+            DISPLACEMENTS_KEY: mae_disp.item(),
+            UPDATE_VELOCITIES_KEY: mae_vel.item(),
+        }
+
+        rel_maes = {}
+        if ref_disp_abs_sum > 0:
+            rel_maes[DISPLACEMENTS_KEY] = (err_disp_abs_sum / ref_disp_abs_sum).item()
+        if ref_vel_abs_sum > 0:
+            rel_maes[UPDATE_VELOCITIES_KEY] = (err_vel_abs_sum / ref_vel_abs_sum).item()
+
+        return loss, maes, rel_maes
 
     def _train_epoch(self, train_loader: DataLoader, epoch_index: int):
         running_loss = 0.0
         mae_disp = 0.0
         mae_vel = 0.0
+        err_disp_abs_sum = 0.0
+        err_vel_abs_sum = 0.0
+        ref_disp_abs_sum = 0.0
+        ref_vel_abs_sum = 0.0
 
         progress = tqdm(
             train_loader,
@@ -467,12 +527,21 @@ class Trainer:
             err_disp, err_vel = torch.split(
                 (predictions - reference).abs(), self.output_dimensions, dim=1
             )
+            ref_disp, ref_vel = torch.split(
+                reference, self.output_dimensions, dim=1
+            )
 
             batch_mae_disp = err_disp.mean().detach()
             batch_mae_vel = err_vel.mean().detach()
 
             mae_disp += batch_mae_disp * data_batch.size(0)
             mae_vel += batch_mae_vel * data_batch.size(0)
+
+            # accumulate absolute sums for relative MAE (percent) computation
+            err_disp_abs_sum += err_disp.sum().detach()
+            err_vel_abs_sum += err_vel.sum().detach()
+            ref_disp_abs_sum += ref_disp.abs().sum().detach()
+            ref_vel_abs_sum += ref_vel.abs().sum().detach()
 
             # Backward pass and update weights
             self.optimizer.zero_grad()
@@ -502,7 +571,14 @@ class Trainer:
         maes = {}
         maes[DISPLACEMENTS_KEY] = mae_disp.item() / train_loader.dataset.num_nodes
         maes[UPDATE_VELOCITIES_KEY] = mae_vel.item() / train_loader.dataset.num_nodes
-        return epoch_loss, maes
+
+        rel_maes = {}
+        if ref_disp_abs_sum > 0:
+            rel_maes[DISPLACEMENTS_KEY] = (err_disp_abs_sum / ref_disp_abs_sum).item()
+        if ref_vel_abs_sum > 0:
+            rel_maes[UPDATE_VELOCITIES_KEY] = (err_vel_abs_sum / ref_vel_abs_sum).item()
+
+        return epoch_loss, maes, rel_maes
 
     def train(self):
         # setup the logger
@@ -628,7 +704,9 @@ class Trainer:
 
         while epoch < self.num_epochs:
 
-            loss_train, maes_train = self._train_epoch(data_loader, epoch)
+            loss_train, maes_train, rel_maes_train = self._train_epoch(
+                data_loader, epoch
+            )
 
             if lr_scheduler is not None:
                 lr_rate = lr_scheduler.return_lr(self.optimizer)
@@ -636,7 +714,11 @@ class Trainer:
                 lr_rate = self.config["training"].get("optimizer_settings")["lr"]
 
             if self.use_tensorboard and self.tensorboard:
-                loss_val = self.tensorboard.update(
+                (
+                    loss_val,
+                    val_maes,
+                    val_rel_maes,
+                ) = self.tensorboard.update(
                     epoch=epoch,
                     loss=loss_train.item(),
                     model=self.model,
@@ -644,7 +726,7 @@ class Trainer:
                     maes=maes_train,
                 )
             else:
-                loss_val = self._compute_validation_loss()
+                loss_val, val_maes, val_rel_maes = self._compute_validation_loss()
 
             # if scheduler is set update learning rate
             if lr_scheduler:
@@ -656,6 +738,9 @@ class Trainer:
                 loss_val=loss_val,
                 maes_train=maes_train,
                 lr=lr_rate,
+                rel_maes_train=rel_maes_train,
+                maes_val=val_maes,
+                rel_maes_val=val_rel_maes,
             )
 
             # report loss

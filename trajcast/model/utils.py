@@ -149,6 +149,10 @@ class TensorBoard:
         total_data_size = 0
         mae_disp = 0.0
         mae_vel = 0.0
+        err_disp_abs_sum = 0.0
+        err_vel_abs_sum = 0.0
+        ref_disp_abs_sum = 0.0
+        ref_vel_abs_sum = 0.0
 
         model.eval()
         with torch.no_grad():
@@ -172,10 +176,15 @@ class TensorBoard:
                 err_disp, err_vel = torch.split(
                     (predictions - reference).abs(), self.dimensions, dim=1
                 )
+                ref_disp, ref_vel = torch.split(reference, self.dimensions, dim=1)
                 total_data_size += val_batch.size(0)
 
                 mae_disp += err_disp.mean().detach() * val_batch.num_nodes
                 mae_vel += err_vel.mean().detach() * val_batch.num_nodes
+                err_disp_abs_sum += err_disp.sum().detach()
+                err_vel_abs_sum += err_vel.sum().detach()
+                ref_disp_abs_sum += ref_disp.abs().sum().detach()
+                ref_vel_abs_sum += ref_vel.abs().sum().detach()
 
         # save to the ternsorboard
         epoch_loss = loss / total_data_size
@@ -190,13 +199,27 @@ class TensorBoard:
         maes[DISPLACEMENTS_KEY] = mae_disp
         maes[UPDATE_VELOCITIES_KEY] = mae_vel
 
+        rel_maes = {}
+        if ref_disp_abs_sum > 0:
+            rel_maes[DISPLACEMENTS_KEY] = err_disp_abs_sum / ref_disp_abs_sum
+        if ref_vel_abs_sum > 0:
+            rel_maes[UPDATE_VELOCITIES_KEY] = err_vel_abs_sum / ref_vel_abs_sum
+
         for prop, mae in maes.items():
             self.writer.add_scalars(
                 f"MAE {prop}",
                 {"validation": mae.item()},
                 epoch,
             )
-        return epoch_loss
+
+        for prop, rel_mae in rel_maes.items():
+            self.writer.add_scalars(
+                f"MAE% {prop}",
+                {"validation": (rel_mae * 100)},
+                epoch,
+            )
+
+        return epoch_loss, maes, rel_maes
 
     def _track_weights(self, epoch: int, model, every: int = 1):
 
@@ -235,6 +258,8 @@ class TensorBoard:
         maes: Optional[Dict] = {},
     ):
         validation_loss = None
+        validation_maes = None
+        validation_rel_maes = None
 
         # loop over all metrics
         for metric, metric_args in self.metrics_to_record.items():
@@ -248,7 +273,7 @@ class TensorBoard:
                 # get information on validation data
                 data_args = metric_args["data"]
                 val_batch_size = metric_args.get("batch_size", 1)
-                validation_loss = self._track_loss_val(
+                validation_loss, validation_maes, validation_rel_maes = self._track_loss_val(
                     epoch=epoch,
                     model=model,
                     data_args=data_args,
@@ -282,7 +307,7 @@ class TensorBoard:
                         model=model,
                     )
 
-        return validation_loss
+        return validation_loss, validation_maes, validation_rel_maes
 
 
 # Notice that the resave and continuation has to be changed.
