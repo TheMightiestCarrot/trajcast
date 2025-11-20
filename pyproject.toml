@@ -27,6 +27,7 @@ dependencies = [
     "tensorboard >= 2.18",
     "pyyaml >= 6.0.0",
     "torch-nl >= 0.3",
+    "huggingface-hub >= 0.29.0",
 ]
 
 [project.optional-dependencies]
