@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict
+import yaml
 
 from trajcast.data._keys import (
     DISPLACEMENTS_KEY,
@@ -39,6 +40,12 @@ SYSTEM_CONFIG = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train TrajCast on a downloaded dataset.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional YAML config file. If set, values are loaded first and then overridden by CLI flags.",
+    )
     parser.add_argument(
         "--system",
         choices=sorted(SYSTEM_CONFIG.keys()),
@@ -199,6 +206,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum irrep order for equivariant features.",
     )
     parser.add_argument(
+        "--model-type",
+        choices=("Flexible", "TrajCast", "EfficientTrajCastModel", "PaiNN"),
+        default=None,
+        help="Override model type (default keeps config or EfficientTrajCastModel for presets).",
+    )
+    parser.add_argument(
         "--mlp-width",
         type=int,
         default=16,
@@ -281,6 +294,7 @@ def build_training_config(
     run_dir: Path,
     training_data: Dict,
     validation_data: Dict,
+    model_type: str,
 ) -> Dict:
     tensorboard_settings = {
         "loss": True,
@@ -293,7 +307,7 @@ def build_training_config(
 
     return {
         "seed": args.seed,
-        "model_type": "EfficientTrajCastModel",
+        "model_type": model_type,
         "device": args.device,
         "restart_latest": args.restart_latest,
         "target_field": "target",
@@ -336,7 +350,36 @@ def build_training_config(
 
 def main() -> None:
     args = parse_args()
+    # If a full config is provided, load it and (optionally) override a few fields.
+    if args.config:
+        with open(args.config, "r") as f:
+            config = yaml.load(f, Loader=yaml.FullLoader)
+
+        # Optional CLI overrides
+        if args.model_type:
+            config.setdefault("training", {})["model_type"] = args.model_type
+
+        if args.run_dir:
+            run_dir = args.run_dir.resolve()
+            run_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_root = str(run_dir / "checkpoints")
+            tb_root = str(run_dir / "tb_log")
+            config.setdefault("training", {}).setdefault("checkpoint_settings", {})[
+                "root"
+            ] = ckpt_root
+            config["training"].setdefault("tensorboard_settings", {})[
+                TENSORBOARD_LOG_ROOT_KEY
+            ] = tb_root
+
+        trainer = Trainer(config)
+        trainer.train()
+        config_out = args.config_out or Path("config_used.yaml")
+        trainer.dump_config_to_yaml(str(config_out))
+        print(f"[done] Training finished. Config saved to {config_out}")
+        return
+
     system_cfg = SYSTEM_CONFIG[args.system]
+    model_type = args.model_type or "EfficientTrajCastModel"
 
     data_root = args.data_root or Path("data") / args.system
     data_root = data_root.resolve()
@@ -374,6 +417,7 @@ def main() -> None:
         run_dir=run_dir,
         training_data=training_data,
         validation_data=validation_data,
+        model_type=model_type,
     )
 
     config = {

@@ -162,21 +162,21 @@ python scripts/download_datasets.py --dataset paracetamol
 ```
 - **Train — Paracetamol (Δt=7 fs)**:
 ```bash
-python scripts/train_trajcast.py --system paracetamol --data-root data/paracetamol \
+python scripts/train.py --system paracetamol --data-root data/paracetamol \
   --edge-cutoff 4.0 --num-hidden-channels 64 --num-mp-layers 4 --max-rotation-order 2 \
   --precision 64 --batch-size 10 --num-epochs 1500 --learning-rate 0.01 --max-grad-norm 0.5 \
   --vel-max 0.14 --o3-backend cueq --run-dir runs/paper/paracetamol --no-tensorboard
 ```
 - **Train — Quartz (Δt=30 fs)**:
 ```bash
-python scripts/train_trajcast.py --system quartz --data-root data/quartz \
+python scripts/train.py --system quartz --data-root data/quartz \
   --edge-cutoff 4.5 --num-hidden-channels 64 --num-mp-layers 4 --max-rotation-order 2 \
   --precision 64 --batch-size 2 --num-epochs 1500 --learning-rate 0.01 --max-grad-norm 0.5 \
   --vel-max 0.035 --o3-backend cueq --run-dir runs/paper/quartz --no-tensorboard
 ```
 - **Train — Water (Δt=5 fs)**:
 ```bash
-python scripts/train_trajcast.py --system water --data-root data/water \
+python scripts/train.py --system water --data-root data/water \
   --edge-cutoff 6.0 --num-hidden-channels 64 --num-mp-layers 4 --max-rotation-order 2 \
   --precision 64 --batch-size 2 --num-epochs 1500 --learning-rate 0.01 --max-grad-norm 0.5 \
   --vel-max 0.14 --o3-backend cueq --run-dir runs/paper/water --no-tensorboard
@@ -184,7 +184,7 @@ python scripts/train_trajcast.py --system water --data-root data/water \
 - **Smoke test (minutes, CPU)**:
 ```bash
 python scripts/download_datasets.py --dataset example
-python scripts/train_trajcast.py --system example --num-epochs 2 --batch-size 2 --precision 32 \
+python scripts/train.py --system example --num-epochs 2 --batch-size 2 --precision 32 \
   --run-dir runs/smoke/example --device cpu --no-wandb
 ```
 - **Pretrained inference** (pick system files from `ibm-research/trajcast.models-arxiv2025`):

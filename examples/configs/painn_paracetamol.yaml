@@ -1,0 +1,54 @@
+model:
+  precision: 64
+  cutoff: 4.0
+  hidden_features: 128
+  num_layers: 6
+  num_rbf: 64
+  use_velocity_input: true
+  include_velocity_norm: true
+
+data:
+  root: data/paracetamol
+  name: paracetamol_training
+  cutoff_radius: 4.0
+  files:
+    - train.extxyz
+  rename: true
+  atom_type_mapper:
+    1: 0
+    6: 1
+    7: 2
+    8: 3
+
+training:
+  seed: 1705
+  model_type: PaiNN
+  device: cuda
+  restart_latest: false
+  target_field: target
+  reference_fields:
+    - displacements
+    - update_velocities
+  batch_size: 10
+  max_grad_norm: 0.5
+  num_epochs: 1500
+  criterion: mse
+  optimizer: adam
+  optimizer_settings:
+    lr: 0.01
+    amsgrad: true
+  scheduler:
+    - ReduceLROnPlateau
+  scheduler_settings:
+    ReduceLROnPlateau:
+      factor: 0.8
+      patience: 25
+      min_lr: 1.0e-4
+  chained_scheduler_hp:
+    milestones:
+      - 10000000
+    per_epoch: true
+    monitor_lr_scheduler: false
+  checkpoint_settings:
+    root: runs/paper/paracetamol_painn/checkpoints
+  use_tensorboard: false
