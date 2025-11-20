@@ -1,0 +1,1102 @@
+FORCE-FREE MOLECULAR DYNAMICS THROUGH
+AUTOREGRESSIVE EQUIVARIANT NETWORKS
+Fabian L. Thiemann∗
+IBM Research Europe
+Daresbury, WA4 4AD, United Kingdom
+fabian.thiemann@ibm.com
+Thiago Reschützegger
+IBM Research
+Rio de Janeiro, 20031-170, RJ, Brazil
+Massimiliano Esposito
+IBM Research Europe
+Daresbury, WA4 4AD, United Kingdom
+Tseden Taddese
+The Hartree Centre
+Science and Technology Facilities Council
+Daresbury, WA4 4AD, United Kingdom
+Juan D. Olarte-Plata
+The Hartree Centre
+Science and Technology Facilities Council
+Daresbury, WA4 4AD, United Kingdom
+Fausto Martelli
+IBM Research Europe
+Daresbury, WA4 4AD, United Kingdom
+April 1, 2025
+ABSTRACT
+Molecular dynamics (MD) simulations play a crucial role in scientific research. Yet their computa-
+tional cost often limits the timescales and system sizes that can be explored. Most data-driven efforts
+have been focused on reducing the computational cost of accurate interatomic forces required for
+solving the equations of motion. Despite their success, however, these machine learning interatomic
+potentials (MLIPs) are still bound to small time-steps. In this work, we introduce TrajCast, a trans-
+ferable and data-efficient framework based on autoregressive equivariant message passing networks
+that directly updates atomic positions and velocities lifting the constraints imposed by traditional
+numerical integration. We benchmark our framework across various systems, including a small
+molecule, crystalline material, and bulk liquid, demonstrating excellent agreement with reference MD
+simulations for structural, dynamical, and energetic properties. Depending on the system, TrajCast
+allows for forecast intervals up to 30× larger than traditional MD time-steps, generating over 15
+ns of trajectory data per day for a solid with more than 4,000 atoms. By enabling efficient large-
+scale simulations over extended timescales, TrajCast can accelerate materials discovery and explore
+physical phenomena beyond the reach of traditional simulations and experiments. An open-source
+implementation of TrajCast is accessible under https://github.com/IBM/trajcast.
+Keywords Molecular dynamics · Machine learning · Equivariance
+Introduction
+Molecular Dynamics (MD) simulations are an essential tool in modern science, providing mechanistic insight into
+complex phenomena, such as protein folding [ 1, 2 ], the effects of pressure on materials [3– 6 ], the existence of
+liquid-liquid transitions in supercooled liquids [7– 9], and amorphization [ 10 –12 ], to name but a few, that are difficult or
+impossible to study through experiments alone. By numerically integrating the equations of motion for all particles in
+∗To whom the correspondance should be addressed.
+arXiv:2503.23794v1 [physics.comp-ph] 31 Mar 2025
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+the molecule or material of interest, these simulations generate a trajectory, T := {x(t)}t=tmax
+t=t0 , where each state x(t) is
+defined by the positions, r(t) ∈ R3N , and velocities, v(t) ∈ R3N , of the N atoms at given time t. However, obtaining
+trajectories at first principles accuracy is computationally intensive, typically limiting them to systems of a few hundred
+atoms and timescales up to one nanosecond. These computational costs arise from (1) accurately approximating
+the Schrödinger equation to obtain reliable forces, and (2) the necessity for millions of integration steps due to the
+typically small time-step of 0.5 – 1.0 femtoseconds (fs). Accordingly, two strategies have emerged to speed up tra-
+jectory generation, focusing on either improving force prediction efficiency or evolving the system with larger time-steps.
+Machine learning interatomic potentials (MLIPs) fall into the first group and can accelerate the calculation of ab
+initio-quality forces by orders of magnitude. Trained on small systems where electronic structure calculations are
+feasible, these models operate locally, allowing for an accurate representation of the potential energy surface in broader,
+chemically similar systems without requiring direct reference data. This has not only enabled access to much larger
+time and length scales, as demonstrated by the remarkable nanosecond-long simulation of the HIV virus with 44 million
+atoms [13], but has also catalyzed exciting discoveries in simulations, including a new superionic phase of water under
+confinement [ 14] and structural and electronic phase transitions in silicon [15 ]. The pursuit for faster and more accurate
+architectures has evolved from kernel-based methods to equivariant graph neural networks (GNNs) [16 –27 ], maturing
+into its own field [ 28 – 31]. This rapid progression has culminated recently in the introduction of several foundation
+models [32–36] trained on large parts of the periodic table, which can be fine-tuned to the system of interest.
+Multiple-time-step (MTS) integrators [37 , 38 ], conversely, follow the second strategy aiming to loosen the constraint
+of small integration steps. Specifically, they assign shorter time-steps to rapidly changing interactions, like atomic
+bonds, and longer time-steps to slower intermolecular interactions. In practice, MTS integrators are primarily used with
+classical potentials, which provide inherent scale separation through their analytical yet less accurate and transferable
+form. A recent study [ 39 ], however, successfully coupled MTS with MLIPs by co-training a smaller model for
+short-time interactions, evaluated at each timestep during MD, alongside a larger, more expressive model which is
+called less frequently. While this led to a 3× speed-up, MTS integrators are fundamentally limited by the need for small
+time-steps in parts of the system, and further validation of scale-separated MLIPs for more complex systems is needed.
+Generative machine learning approaches go beyond the idea of MTS, seeking to efficiently generate representative
+configurations or even complete trajectories without computing or integrating interatomic forces. Boltzmann
+generators [40 ] directly approximate the Boltzmann distribution, producing states consistent with the equilibrium
+distribution at temperature T . However, these samples lack temporal order, obstructing insights into the system’s
+temporal evolution and dynamical properties. Recurrent neural networks have been shown to accurately interpolate MD
+trajectories of small molecules [41 ] and reliably predict the dynamics of 16 Lennard-Jones particles with time-steps
+over 1000× larger than in traditional MD simulations [42]. These methods, however, operate with a fixed particle
+number, requiring retraining for unseen or larger systems, which restricts their applicability to realistic large-scale
+problems where accurate ab initio reference data is often hard or impossible to obtain.
+The flow-based Timewarp [43 ] model, conversely, generates MD trajectories via autoregressive roll-out with time-steps
+up to the order of 105 fs and has been shown to generalize to unseen peptides. Notwithstanding the speed-up of
+Timewarp and its recent generative competitors, ITO[ 44 ] and MDGen[45 ], these approaches propagate atomic positions
+only, leaving the system’s state incomplete without momenta. Beyond impeding the computation of transport properties,
+this lack of full phase-space coverage introduces ambiguity; the same atomic configuration can correspond to different
+velocity distributions and, thus, trajectories at different temperatures. This limits the ability of these methods to
+interpolate and extrapolate across thermodynamic variables. Other deep learning architectures, such as the equivariant
+graph neural operator [ 46] or the work presented by Fu et al. [47 ], incorporate assumptions about chemical bonds or
+restrict their focus to heavy atom motion. While these inductive biases may improve performance on specific tasks,
+they hinder generalizability to reactive systems where bond breaking and formation occurs. Beyond architectural
+details, many of these methods require hundreds of nanoseconds of trajectory data to predict small molecule behavior
+accurately, making them less practical for scaling to complex systems. Furthermore, nearly all generative models have
+been evaluated exclusively on small molecules and peptides, leaving their applicability to materials, condensed matter
+phases, and the accurate reproduction of equilibrium structural and dynamical properties largely unexplored.
+In this work, we introduce TrajCast, a framework that employs equivariant message passing neural networks (MPNNs)
+to autoregressively predict the next state of a molecular system. Unlike most MLIPs that derive forces from predicted
+energies, TrajCast directly outputs the next state (positions and velocities) over a period ∆t which is at least one
+2
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+magnitude larger than the typical timestep in equivalent MD simulations. By preserving the sequential nature of
+the trajectory, TrajCast recovers the system’s dynamics and enables the computation of time-dependent properties.
+Generating full-state trajectories during roll-out ensures a complete system representation, enabling interpolation and
+extrapolation across different temperature regimes. TrajCast is free of assumptions about chemical bonds, making it
+capable, in principle, of modeling reactive systems. Relying on local environments, TrajCast is highly scalable and
+transferable, enabling models trained on small systems to be applied to larger or chemically similar ones. Moreover,
+TrajCast is very data-efficient, requiring significantly less than 1 ns of trajectory training data to achieve accurate
+predictions. To our knowledge, TrajCast is the only generative framework that integrates all these capabilities. We
+demonstrate its accuracy across a range of systems, from small molecules to crystalline solids and bulk liquids,
+highlighting its ability to consistently reproduce structural, energetic, and dynamic properties, and showcasing its
+robustness and versatility across different domains. Dependent on the system, TrajCast uses time intervals between 10×
+and 30× larger than traditional MD time-steps. By avoiding gradient computations, this enables trajectory generation of
+more than 15 ns and 1 ns per day for crystalline quartz and liquid water, comprising 4,300 and 5,100 atoms, respectively.
+Results
+TrajCast Framework
+We start by outlining the TrajCast architecture to predict temporal evolution of an atomistic system, as depicted in
+Fig. 1. TrajCast produces trajectories autoregressively, where the state x(t + ∆t) is generated from x(t) and used to
+predict the next state at the following time interval ∆t (Fig. 1A), thus preserving the Markovian nature of traditional
+MD. To enable comparison with experiments at constant temperature, we aim to sample trajectories from the canonical
+ensemble at constant temperature T . We achieve this using a strategy inspired by the CSVR thermostat [48 ], where
+each time step is followed by a rescaling of the atomic velocities to enforce canonical sampling. Rather than relying
+on forces to propagate the system using numerical integration in the microcanonical (NVE) ensemble with a small
+timestep δt, however, an equivariant MPNN predicts the updated positions and velocities at a larger timestep ∆t ≫ δt,
+as shown in the grey box in Fig. 1A. Additional model details are provided in the methods section, and here we focus
+on the key elements and deviations from previous work.
+Compared to MLIPs, our equivariant MPNN takes the atomic velocities v(t) in addition to the positions r(t) and
+atomic types Z as input. In an embedding layer (Fig. 1B) both node and edge attributes are encoded to produce the
+initial node features h0
+i and express the edge and velocity vectors in a radial and spherical harmonics basis. For the
+chemical element Zi and the magnitude of the edge vectors rij , we follow the same approach as the MLIPs NequiP [ 22 ]
+and MACE [ 24], using a one-hot encoding and learnable Bessel functions multiplied with a polynomial cutoff as
+introduced originally in DimeNet [49], respectively. Since the atomic velocity depends on the particle mass, we encode
+its magnitude vi using a Gaussian basis set, where each Gaussian is weighted according to the chemical element of
+node i. Thus, the μth element of the encoding is given by:
+Rμ(vi) =
+MX
+m=1
+WZi,mϕm(vi) (1)
+where ϕm is the mth Gaussian and WZi,m is a learnable weight dependent on atomic species Zi.
+The latent features are updated through a series of convolutions in the message passing layer highlighted by the white
+box in Fig. 1A. The message from node j to node i in layer k, schematically shown in Fig. 1E, is constructed similarly
+to that in NequIP [22], and given by
+mk
+ij = hk
+j ⊗MLPk
+e (R(rij ))
+CG Y(ˆrij ) . (2)
+Here, ⊗MLPk
+e (R(rij ))
+CG represents the Clebsch-Gordan (CG) tensor product, which generates all equivariant combinations
+of irreducible representations (irreps) of node features and the spherical harmonic embedding of the edge vector
+projected on the unit sphere, ˆrij . The individual terms are then weighted by a multilayer perceptron (MLP), which take
+the radial basis embeddings of the edge vector magnitudes rij as input. For details on the derivation, the reader is
+referred to textbooks on representation theory overview and references [ 50 ], [51 ], or [ 23 ] for applications to GNNs and
+atomistic modeling.
+The constructed pairwise messages, mij , only contain information about the topology of the neighborhood N (i). To
+incorporate velocities in the feature update (Fig. 1D), we follow an approach introduced by Brandstetter et al. [51 ].
+3
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Figure 1: Overview of the TrajCast architecture. (A) Autoregressive workflow: An atomistic system at time t0 is
+passed through an equivariant MPNN (grey box) to predict the new positions and velocities at time t1. Atomic attributes
+(positions, velocities, chemical elements) are encoded into initial features, which are refined over T message passing
+blocks. Estimates of the displacement and velocity vectors are generated based on the final features. These are then
+refined to ensure momentum conservation. The trajectory is built by rolling out predictions, where outputs from one step
+serve as inputs for the next. A thermostat ensures sampling from the canonical (NVT) ensemble at constant temperature
+T , with states following the Boltzmann distribution. (B) The embedding block encodes node and edge attributes and
+generates the initial features. (C) Messages are constructed by convolving latent features with filters derived from
+a learnable radial basis and the spherical harmonics expansion of edge vectors. (D) In the update block, messages
+from neighbors are pooled and combined via a tensor product with velocity vectors in a learnable radial and spherical
+harmonic basis. The result is passed through a non-linearity and added to the previous layer’s features, weighted by
+the node’s chemical element. (E) Conservation of total linear and angular momentum is enforced by adjusting the
+displacements and velocities.
+After an average pooling of the pairwise messages mij , we compute a node-based CG tensor-product between the
+aggregated message, mi, and the spherical harmonic embedding of the velocity vector projected on the unit sphere, ˆvi,
+resulting in
+˜mk
+i = mk
+i ⊗MLPk
+v (R(vi,Zi))
+CG Y(ˆvi) . (3)
+Similar to the first tensor product, the respective paths are weighted based on the species dependent embedding of
+the velocity magnitudes, R(vi, Zi), passed through a MLP. We constrain the dimensionality of ˜mk
+i by applying a
+linear self-interaction after the average pooling step. The new node features hk+1
+i are then computed in a ResNet-like
+approach: The conditioned message ˜mk
+i is passed through a non-linear gate [52] and added to the transformed node
+features from the previous layer, which are processed using an element-dependent linear self-interaction layer, as
+proposed in MACE [24, 53].
+After K message passing layers, the vector components (l = 1, p = −1) of the final latent features hK
+i are passed
+through two linear layers to produce the initial estimate of the displacement vector ∆r′
+i and the new velocity v′
+i.
+Predicting relative displacements instead of absolute positions makes the model predictions independent of the
+dimensions of the simulation box. Since both total linear and angular momentum are conserved in the NVE ensemble,
+the displacements and velocities are refined by removing any center of mass motion, ∆DCOM, and excess momenta,
+∆P and ∆L, generated during the process as illustrated in Fig. 1D. The new positions are then calculated by adding
+the displacements to the current atomic positions, while the refined velocities are rescaled by a CSVR thermostat [48 ]
+transitioning the system from the NVE ensemble to the NVT ensemble with positions r∆t and velocities v∆t that follow
+the Boltzmann distribution. These outputs are used as inputs for the next step, gradually building the system’s trajectory.
+While TrajCast can, in principle, operate without a thermostat to forecast a trajectory in the NVE ensemble, long
+autoregressive roll-outs tend to accumulate errors, leading to instability. Beyond maintaining a constant temperature,
+in the course of this work, we found that the noise injected by the CSVR thermostat helps to stabilize the model’s
+predictions, as previously observed in the context of turbulence modeling [54].
+4
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+We train our equivariant MPNN on configurations generated during MD runs within the NVE ensemble using common
+time-steps of 0.5–1.0 fs. Relative displacements and new velocities are then computed over larger time intervals ∆t.
+During training, the model weights are adjusted to minimize the residual between the true and predicted displacement
+and velocity vectors. Since the current version of TrajCast infers the prediction horizon directly from the data, the
+training set needs to be precomputed at a fixed ∆t. Similar to traditional MD simulations, the choice of ∆t involves
+a trade-off: Smaller values inherently result in higher accuracy, as the system becomes increasingly decorrelated
+over time, but are less efficient, requiring more forward passes to produce the desired trajectory. By predicting
+atomic displacements and velocities based on the local environment encoded in latent features, our approach ensures
+transferability across different chemical spaces and scalability to much larger systems than those encountered during
+training. Unlike MLIP-driven MD, TrajCast operates in force-free manner and does not rely on computing gradients
+with respect to the positions to propagate the system in time. Our framework buildson the e3nn [55 ] and cuEquivariance
+Python libraries, which ensure the efficient equivariant transformation and propagation of geometric objects within
+deep learning frameworks.
+Experiments
+We validate the accuracy of TrajCast across various systems. In addition to the small molecule paracetamol, we
+demonstrate its performance on crystalline α-quartz and liquid water. For each system, we train several models across
+different prediction horizons ∆t. We report the mean absolute errors (MAE) for displacements and velocities for all
+MPNNs on a hold-out test set in section A.1 of the SI, showing that MAEs increase with larger ∆t. Besides deviating
+from the true NVE trajectory, large MAEs can cause instabilities, leading to unphysical behavior. Here, we showcase
+results for the largest ∆t that accurately reproduces the chosen properties and produces a stable trajectory. Since
+our methodology samples from the canonical ensemble, direct comparison with MD is infeasible, as trajectories will
+inevitably depart due to the thermostat-induced randomness. Instead, we assess whether ensemble averages of dynamic,
+structural, and energetic properties are accurately reproduced. We demonstrate in section B.2 of the SI, however,
+that TrajCast can reproduce a NVE trajectory accurately when run without a thermostat. Finally, we conclude our
+experiments, by comparing the data efficiency of TrajCast across systems and prediction intervals ∆t.
+Small Molecules: Paracetamol
+We start by benchmarking the proposed methodology based on paracetamol, a small molecule included in the
+(rev)MD17 datasets [56, 57 ] commonly used for validating MLIPs. Paracetamol is chosen for its size and the presence
+of four distinct chemical elements (H, C, N, and O). Rather than using the original datasets, we perform classical MD
+simulations and produce a set of 10,000 training configurations sampled from NVE trajectories equilibrated at 300 K.
+The prediction horizon is set to ∆t = 7 fs, 14 times larger than the timestep used in the MD reference. With the MPNN
+coupled to the CSVR thermostat, we generate a stable 7 ns trajectory (106 steps) to compute ensemble averages and
+properties for comparison against MD NVT trajectories. For a fair comparison, all properties from the MD reference
+were computed using the same frame frequency as the prediction horizon in TrajCast. Specifically, we validate our
+approach by assessing its accuracy in reproducing the molecule’s dynamics, energetics, and kinetics, as shown in Fig. 2.
+For the dynamics, we analyse the species-resolved vibrational density of states (VDOS), which provides a comprehen-
+sive description of intramolecular and, if applicable, intermolecular motion. Panel A of Fig. 2 displays the VDOS
+for all chemical species, computed from both MD and TrajCast trajectories. With the chosen prediction horizon, the
+highest resolvable frequency is ≈ 2400 cm−1, which prevents detecting intramolecular vibrations of bonds like C–H
+and O–H, with characteristic frequencies around or above 3000 cm−1. Within the resolvable range, our model shows
+excellent agreement with the MD reference, achieving overlap scores of ≈ 0.95, following the method in reference [ 58].
+While larger time-steps in MD cause shifts in the VDOS peaks due to integration errors and aliasing, this artifact is
+absent in TrajCast, where peaks align with those from the small MD time-step.
+Next, we report the potential energy distribution in Fig. 2B, computed from all configurations in both TrajCast and
+MD trajectories using the same force field. We find that the distributions match very closely, indicating that TrajCast
+indeed samples from the Boltzmann distribution and produces a trajectory within the NVT ensemble. This also provides
+evidence that structural features, such as bonds, angles, and dihedrals, are well recovered. Building on this, we explore
+how well TrajCast resolves the system’s kinetics based on free energy barriers in panel C of Fig. 2. Specifically, we
+compute the free energy surface (FES) as a function of two dihedral angles, ψ1 and ψ2, corresponding to the torsional
+rotation of the hydroxyl and amine group, respectively, highlighted in the left box in center panel of Fig. 2C. The
+FES from both MD and TrajCast agree very well qualitatively, as shown in the top panel of Fig. 2C. In both cases,
+paracetamol preserves planarity and adopts either a cis or trans configuration, with the hydroxyl and amine groups
+5
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Figure 2: Comparison of properties of paracetamol from MD and TrajCast with a 7 fs prediction horizon. (A)
+Dynamical properties are compared based on the element-specific vibrational density of states (VDOS). (B) Energetics
+are validated by comparing the distribution of the potential energy, computed in post-processing for the Trajcast-
+generated trajectory by using the same force field as in the reference MD. (C) Free energy barriers drive the system’s
+kinetics and are computed from the free energy surface (FES), shown for both MD and TrajCast at the top. The FES is
+generated by sampling two dihedral angles, ψ1 and ψ2, visualized by the inset within the bottom panel. The center
+panel visualizes different realizations of paracetamol for various dihedral pairs, matching the colors of corresponding
+points in the FES. Barriers are calculated along the cuts shown on the FES and colored accordingly in the bottom panel.
+pointing in the same or opposite directions, respectively. These configurations can be realized by different sets of
+dihedral angles related by symmetry: cis configurations correspond to |ψ1| ≤ π/2 and |ψ2| ≤ π/2, or |ψ1| ≥ π/2 and
+|ψ2| ≥ π/2; trans configurations occur when |ψ1| ≥ π/2 and |ψ2| ≤ π/2, or |ψ1| ≤ π/2 and |ψ2| ≥ π/2. Snapshots
+of paracetamol corresponding to selected dihedral pairs in the FES are shown in the central panel of Fig. 2C. For a
+more quantitative comparison, we compute the barriers along cuts at ψ1 = 0 and ψ2 = 0, shown in the bottom panel of
+Fig. 2C. TrajCast closely matches the shape and barrier heights predicted by MD, with nearly identical free energy
+profiles for hydroxyl dihedral rotation (ψ2 = 0) and deviations within ≈ kB T for varying ψ2, peaking at the local
+maxima (ψ2 → ±π/2). Overal, the agreement in kinetics, energetics, structural characteristics, and dynamics provides
+strong evidence that TrajCast can reliably predict accurate trajectories of isolated molecules.
+Crystalline Solid: Quartz
+We now move to benchmarking our framework for condensed matter phases, beginning with crystalline α-quartz
+illustrated in Fig. 3A. To this end, we train our MPNN on 5,000 samples from MD simulations of systems comprising
+162 atoms at 300 K. In contrast to atoms of gas-phase molecules, particles forming a periodic lattice exhibit a more
+constrained and correlated motion, which allows us to set the prediction horizon to ∆t = 30 fs, a 30-fold increase over
+the MD timestep, while still generating stable and accurate trajectories. Similar to the previous section, we compare
+TrajCast and MD based on the VDOS and energy distribution as shown in Fig. 3B and 3C, respectively. These
+properties are calculated from trajectories of 15 ns length corresponding to 500,000 iterative TrajCast predictions. We
+find that TrajCast agrees very well with the MD reference for both quantities achieving VDOS overlap scores [58 ]
+above 0.95 for both atom types within the resolvable frequency range and almost identical energy distribution. The
+peak at zero frequency is an artifact caused by the small system size and low time-sampling resolution. We observe
+6
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Figure 3: Evaluation of TrajCast on crystalline quartz with a 30 fs prediction horizon. (A) Illustration of an
+atomic configuration of quartz used to train and validate TrajCast. (B) Dynamical properties are compared based on the
+element-specific vibrational density of states (VDOS). (C) Energetics are validated by comparing the distribution of the
+potential energy, computed in post-processing for the Trajcast-generated trajectory by using the same force field as in
+the reference MD.
+that it disappears in both MD and TrajCast when the trajectory is sampled at intervals of 10 fs or lower. The accurate
+reproduction of dynamics, energetics, and structural characteristics at large time intervals suggests TrajCast as a
+useful tool for studying equilibrium properties of solids. In section B.3 of the SI, we demonstrate that our approach
+scales efficiently with system size, enabling the generation of nearly 20 ns per day for a 3 × 3 × 3 quartz supercell
+comprising about 4,300 atoms. As a comparison, MD simulations using the widely used MLIP MACE architecture
+typically produce around 1 ns of trajectory per day for 1,000 atoms [36 ]. Beyond pristine lattices, this could make
+TrajCast well-suited for exploring defective materials, where studying phenomena at low defect concentrations requires
+particularly large system sizes.
+Liquid: Bulk Water
+As a final test case, we focus on liquid bulk water, which requires an accurate description of both intramolecular and
+intermolecular interactions. Specifically, we use a system of 64 water molecules at ambient pressure and 300 K, a
+common setup for ab initio studies of bulk water [59] illustrated in Fig. 4A, with a training budget of 5,000 samples. We
+report results for a prediction horizon of ∆t = 5 fs, as this provides the best trade-off between stability and accuracy.
+While ten times larger than the typical MD timestep, it remains smaller than the prediction horizons explored for
+α-quartz, reflecting the more complex motion of a molecular liquid compared to a crystalline solid. To evaluate the
+accuracy of our model, we generate a 2.5 ns trajectory, corresponding to 500,000 roll-out steps, and compare it with a
+MD trajectory of the same length. In addition to the VDOS, we additionally validate TrajCast based on the mean squared
+displacement (MSD) and the radial distribution function (RDF). The former provides insight into the molecular mo-
+bility, whereas the RDF enables comparison of the local structure across all pairwise combinations of chemical elements.
+Starting with the VDOS in Fig. 4B, TrajCast nearly perfectly reproduces the spectrum for both oxygen and hydrogen
+throughout the entire frequency range, achieving overlap scores [58] of ≈ 0.99. This strongly suggests that our
+framework accurately captures molecular motion across different modes, from high-frequency intramolecular bending
+and stretching to low-frequency intermolecular translation and libration. To complement the validation of the dynamics
+from a position-based perspective, we next examine the mobility of water molecules based on the MSD for a correlation
+time τ of up to 10 ps visualized in Fig. 4C. While TrajCast achieves excellent agreement with its MD reference in the
+ballistic regime, τ ⪅ 0.5 ps, MSDs diverge slightly at longer timescales which is likely due to error accumulation
+during the roll-out process. To quantify these deviations, we compute the diffusion coefficient from the slope of the
+MSDs in the diffusive regime τ ≥ 1.0 ps obtaining 2.18 ± 0.19 and 1.84 ± 0.03 ×10−9 m2 s−1, for TrajCast and MD
+respectively. Although TrajCast predicts slightly more mobile water, the diffusion coefficients are in close agreement,
+indicating that our framework can reliably and consistently predict the dynamics of molecular liquids. Beyond the
+7
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Figure 4: Benchmarking TrajCast on liquid water with a 5 fs prediction horizon. (A) Snapshot of an instantaneous
+configuration of bulk water. (B) Comparison of the element-specific vibrational density of states (VDOS) between
+TrajCast and MD. (C) Mean squared displacement (MSD) of oxygen atoms over a correlation time τ of up to 10 ps,
+complementing the dynamic evaluation. (D) Validation of the molecular liquid structure based on the pairwise
+combinations of chemical elements in the radial distribution function (RDF). The shaded areas represent the threefold
+standard deviation, computed over 4 blocks. The diffusion coefficients are computed based on a fit to the slope in the
+range from 1 to 10 ps following the procedure outlined in [59].
+dynamics, we analyze the liquid’s structure by comparing the RDF, finding excellent agreement across all three pairwise
+combinations of chemical elements shown in Fig. 4D. The only slight deviation occurs in the oxygen-oxygen RDF,
+where TrajCast produces a slightly understructured liquid, consistent with the marginally higher diffusion coefficient.
+While these benchmarks suggest that our methodology can accurately capture the dynamical and structural characteristics
+of bulk liquids at room temperature, we believe TrajCast could be valuable for studying systems dominated by slow
+dynamics, where long but challenging simulations are required [60 –62 ]. For deeply undercooled liquids, for instance,
+these conditions may enable larger prediction horizons, though accurately accounting for cooperative effects and the
+emergence of spatial and temporal heterogeneities remains essential [ 63 ]. Even with ∆t = 5.0 fs, however, TrajCast
+generates over 1 ns of simulation for a 3 × 3 × 3 supercell with more than 5,000 atoms per day as highlighted in section
+B.3 of the SI.
+Scalability and Data Efficiency
+So far, we have presented results for a single prediction horizon and a fixed number of training samples, both of which
+are expected to significantly impact model performance. To explore this, we conduct additional experiments varying
+both factors for all three systems and summarize the results in Fig 5. For each experiment, we train three identical
+models varying only the randomly assigned initial weights. To facilitate comparison across systems, we express the
+8
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Figure 5: Impact of prediction horizon and training set size on performance of TrajCast. (A) Parity plot comparing
+predicted and reference velocities for TrajCast models trained for water with prediction horizons of 0.5 and 15 fs,
+respectively. (B) Dependence of the relative velocity MAE on the MD time-step multiple. Error bars correspond to the
+threefold standard deviations computed across three models varying in the initial weights. (C) Exponents from power
+law fits to learning curves, quantifying the relationship between model accuracy and training set size across different
+chemical systems and MD time-step multiples. The inset shows that these exponents correspond to the slope s of a
+linear fit on a log-log plot of MAE versus training set size. The larger the absolute value of s the larger the improvement
+on the generalization error of the model when additional data is used. The dashed lines serve as guide to the eye.
+prediction horizon as a multiple of the original MD timestep (MTM) and focus on MAEs computed over a test set rather
+than specific properties. We specifically choose the velocity MAE, as velocities remain consistent across different
+prediction horizons within each system.
+We first describe results from models trained on varying prediction horizons, using the same number of training samples
+as in previous experiments. While scientists have developed an intuition for acceptable force errors in MLIPs over the
+past decade, this understanding must first be established for velocity errors in TrajCast. To this end, we present a parity
+plot for models trained on MTMs of 1 and 30 for water in Fig. 5A and achieving a velocity MAE of ≈ 3 × 10−6 Å/fs
+and ≈ 4 × 10−4 Å/fs, respectively. These correspond to relative errors of ≈ 0.03% and ≈ 4.64% when expressed
+with respect to the mean absolute velocity. Interestingly, the parity plot visually suggests two well-performing models
+despite their MAE differing by over two orders of magnitude. However, during roll-out, none of the three models
+with an MTM of 30 was able to produce a stable trajectory longer than a few ten-thousand steps. While MLIPs can
+tolerate relative force errors of up to 30% [64 ], this indicates that TrajCast requires significantly smaller relative errors
+to generate stable and physical trajectories.
+To further explore the sensitivity with respect to the prediction horizon across the investigated systems, Fig. 5B shows
+the relative velocity MAE for TrajCast for MTMs of 1, 2, 10, 20, and 30. In sections A.1 and A.2 of the SI, we report
+the MAE for additional MTMs as well as the scaling of the displacement MAE, which follows a similar trend but with
+consistently smaller relative errors by about 40%. For all systems, we find that the error increases with MTM with
+water exhibiting exponential scaling and the steepest increase. While the molecular motion is highly correlated at
+small time intervals, resulting in small errors, the system quickly decorrelates at larger MTMs due to the stochastic
+motion of the fluid. It also becomes clear that the maximum acceptable model error depends on the specific system. For
+instance, our model for crystalline quartz at a MTM of 30 produces stable trajectories despite a relative velocity MAE
+of approximately 3.96%, whereas a TrajCast model for water at a MTM of 20 and a relative velocity MAE of 1.62%
+may produce instabilities.
+Arguably, a simple solution to stabilize large MTM models and speed up trajectory generation is to train on larger
+datasets. To assess the impact of training set size on model performance across chemical systems and MTMs, we
+train multiple TrajCast models with identical architecture on 10% and 50% of the dataset size used in the experiments
+above. In section A.2 of the SI, we show the MAE for both displacements and velocities as a function of dataset
+size across all systems and MTMs. These learning curves typically follow a power law [65 ], where the exponent s
+determines how quickly model performance improves with more data. In Fig. 5C, we show s as a function of MTM
+for all systems, with a schematic inset illustrating that s corresponds to the slope of a straight line in a log-log plot.
+Interestingly, the dependence of s on MTM varies significantly across chemical space. While the curve for quartz
+9
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+increases monotonically from ≈ −0.5 to ≈ −0.4, paracetamol and bulk water exhibit a non-monotonic relationship,
+reaching a minimum at MTM ≈ 4 before increasing to smaller absolute values. Naturally, learning the system’s
+evolution over larger time intervals is more difficult, requiring more data to capture the variety of potential new states
+and reducing the absolute value of s.
+Across the range of MTMs investigated, paracetamol consistently shows the largest slope, followed by water and quartz,
+reflecting the varying constraints in each system: The atomic motion of quartz is coupled to its rigid lattice, while water
+molecules can move more freely but remain strongly correlated with neighboring molecules. In contrast, gas-phase
+paracetamol is solely governed by intramolecular interactions, requiring fewer examples to resolve, even at long time
+intervals. These observations align with learning curve experiments with MLIPs, where s is roughly 3× larger for
+MACE on an organic molecule [24 ] compared to NequIP for water [ 22]. Notably, their largest slopes are up to 4 times
+smaller than those obtained for our models on similar systems, suggesting that incorporating velocities extracts more
+information from each configuration, improving data efficiency. This enables training accurate TrajCast models on
+dataset sizes similar to MLIPs, using just a few hundred picoseconds of trajectory data instead of the typical hundreds
+of nanoseconds required by other methods [42, 43 , 45, 47 ] This is crucial as generating large datasets at ab initio
+quality becomes infeasible due to the high computational cost, especially when scaling to multiple systems or building
+foundation models.
+Conclusion
+We have introduced Trajcast, a new methodology based on autoregressive equivariant MPNNs to accelerate the
+generation of accurate MD trajectories. Instead of predicting forces for numerical integration, our framework directly
+updates velocities and positions, bypassing the need for small integration steps. We have benchmarked our methodology
+on a variety of chemical systems ranging from a small molecule to condensed matter phases such as crystalline material
+and bulk liquid. In all cases, TrajCast reliably reproduces structural, dynamical, and energetic properties, while enabling
+10× to 30× larger time steps than traditional atomistic MD simulations. Importantly, TrajCast is transferable and scales
+well to larger systems, allowing to generate over 1 ns of trajectory data per day for 1,728 water molecules and more
+than 15 ns for a quartz supercell with more than 4,300 atoms. In contrast, the current MACE MLIP architecture, enables
+MD simulations of about 1 ns for 1,000 atoms per day [36 ]. Notably, our models are trained using only a few hundred
+ps of trajectory data, a quantity feasible to generate with AIMD. The current version of TrajCast operates with fixed
+forecast horizon, however, future work will explore multi-time-step training to which could improve generalizibility
+and accuracy over longer timescales, as demonstrated by a recent autoregressive GNN for weather forecasting [66 ].
+The current force-free approach of TrajCast prevents the computation of pressure and other force-related properties,
+restricting forecasting to the microcanonical (NVE) and canonical (NVT) ensembles. Extending the methodology to the
+isobaric-isothermal (NpT) ensemble, however, will be an interesting avenue for future work. Additionally, although we
+benchmarked our methodology on various systems beyond isolated molecules, it would be interesting to explore how it
+performs when trained on multiple regions of chemical space simultaneously—an important step toward developing a
+foundation model for molecular dynamics. While TrajCast has the potential to accelerate atomistic simulations and
+material discovery in general, we believe a particularly promising application lies exploring slow physical phenomena
+at low temperatures. In these systems, slow relaxation times not only require long simulation runs—as seen in a
+recent study [ 67 ] on supercooled water that took several years to reach the microsecond scale—but also impose higher
+correlations, potentially enabling to leverage larger forecasting horizons. Thus, TrajCast could greatly accelerate this
+process, making large-scale simulations significantly more efficient. By addressing the long-standing challenge of
+accessing long simulation times, our work could help bridge currently disjoint length scales—a key goal in many
+scientific disciplines.
+Methods
+Equivariant Message Passing Neural Networks for Atomistic Systems
+MPNNs, a subclass of GNNs, learn mappings from molecular graphs to target properties such as the potential energy in
+MLIPs. In these graphs, nodes represent atoms, connected by edges usually determined through a distance criterion.
+Each node i has attributes like its atomic type Zi and position ri in three-dimensional (3D) Euclidean space. Depending
+on the task, additional attributes may include the velocity vi or the force fi. Edge attributes typically consist of the
+Euclidean vectors rij connecting two nodes i and j.
+10
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+The local state of each node is encoded in latent features ht
+i which are iteratively updated over T message passing layers.
+In each layer t, nodes exchange information via messages mt
+ij , aggregrated from all neighbors and used to update the
+node’s latent state. Formally, this is expressed as [68]:
+mt
+i = X
+j∈N (i)
+mt
+ij = X
+j∈N (i)
+M t(ht
+i, ht
+j , eij ) (4)
+ht+1
+i = U t(ht
+i, mt
+i) (5)
+where N (i) represents the set of nodes connected to node i and M t and U t are arbitrary message and update functions
+for layer t. While the original formulation omits node attributes in the update, advanced MLIPs like BOTNet [23 ] or
+MACE [24 , 53 ] and other MPNN architectures like SEGNNs [51 ], incorporate them to prevent information loss across
+layers. After T message passing steps, the final features may be pooled for global property prediction or passed through
+a readout function directly for node properties.
+The latent features ht
+i can consist of various types of geometric objects, such as scalars, vectors or higher order tensors,
+each transforming uniquely the Euclidean group E(3) operations of translation, rotation, and inversion. In practice,
+however, it suffices to focus on the orthogonal group O(3) (rotations and reflections), as translational invariance is
+ensured by using interatomic vectors rather than absolute positions. Transformations under O(3) are described by
+irreducible representation (irreps) which are labelled by their rotation order l = 0, 1, 2, . . . and parity p ∈ (1, −1).
+Scalars (l = 0, p = 1) remain invariant under rotation, while vectors (l = 1, p = −1) transform consistently
+(equivariantly) with the geometry. If the features only depend on the atomic positions, formally each element of the
+feature vector with rotation order L, ht
+i,L, is equivariant under any rotation g = R ∈ O(3) if
+ht
+i,L(R · (r1, . . . , rN )) = DL(g)ht
+i,L(r1, . . . , rN ) ∀g ∈ O(3) (6)
+where R is the 3D rotation matrix parametrised by g and DL(g) is the Wigner D-matrix representing the equivalent
+transformation in feature space. These symmetries can, in principle, be learned from augmented datasets comprising
+rotated configurations. Alternatively, they can be explicitly incorporated into MPNNs by using equivariant message and
+update functions, ensuring the network respects rotational symmetry by construction. The latter has become common
+practice in state-of-the-art MLIPs [ 22 –25 ], where leveraging higher-order features beyond scalars has been shown to
+significantly enhance accuracy.
+Ensembles and Thermostats
+By numerically integrating the equations of motion, MD simulations produce a trajectory that follows the distribution
+of the microcanonical (NVE) ensemble, with a constant number of particles N , volume V , and total energy E. In this
+ensemble, both the total linear momentum P and angular momentum L are conserved. However, since experiments
+are usually conducted at constant temperature rather than energy, MD simulations are coupled to a heat bath via a
+thermostat to sample from the canonical (NVT) ensemble, where the temperature T fluctuates around the desired value.
+Microscopically, the temperature T of a N particle system is defined by
+T = 2 K
+Nf kB
+with K = 1
+2
+NX
+i=1
+mi|vi|2 (7)
+where K is the kinetic energy, mi is the mass of particle i, kB is the Boltzmann constant, and Nf corresponds to the
+degrees of freedom, typically given as 3N − 3 for a 3D periodic system.
+Velocity rescaling is the simplest method for adjusting a system to a target temperature, where atomic velocities are
+rescaled at a predefined frequency by a factor α =
+q
+ˆK/K, with ˆK representing the target kinetic energy. However, this
+method has several drawbacks, including failure to sample from the canonical ensemble, generation of discontinuities,
+and violation of equipartition [ 69 ]. The canonical sampling through velocity rescaling (CSVR) thermostat [48 ]
+overcomes these limitations by sampling ˆK from a canonical equilibrium distribution and rescaling the velocities after
+each integration step. The coupling strength, defined by the relaxation time τ relative to the integration timestep, must
+be chosen appropriately to maintain the target temperature without significantly altering the system’s dynamics.
+Reference Data Sets
+All data used for training and validation have been generated using classical MD simulations with the LAMMPS [70, 71 ]
+software package. Training trajectories were generated in the NVE ensemble, while data to assess the roll-out
+11
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+performance of the model architecture stems from NVT runs. To ensure that the NVE trajectories are at the desired
+temperature, we first equilibrate the system in the NVT ensemble. During the equilibration period, the total energy is
+sampled, and configurations with a total energy close to the distribution’s average are subsequently selected. The NVE
+runs are then initiated from five configurations that are uniformly sampled from this subset, ensuring that the selected
+snapshots are at least 1 ps apart. The specific simulation settings for each system are detailed below.
+Paracetamol
+An isolated paracetamol molecule is simulated in vacuum using the OPLS all-atom force field [72 , 73] instantiated with
+Moltemplate [ 74]. We use a time-step of 0.5 fs due to the presence of hydrogen atoms. The system is first equilibrated
+in the NVT ensemble for 25 ps (50,000 steps) using a Nosé-Hoover chain thermostat [75 ], with 10 chains, a damping
+factor of 5 fs, and a target temperature of 300 K. This equilibration protocol is applied uniformly before subsequent
+production runs in both the NVE and NVT ensembles. The NVE production runs are initiated from configurations
+where the total energy is within a relative threshold of 0.001 from the mean of the distribution. For the NVT production
+run, we utilise the CSVR thermostat [ 48 ], consistent with the setup in TrajCast, with a relaxation time of 50 fs. The
+temperature is calculated based on 3N − 6 degrees of freedom. Net angular momentum is removed at each time-step
+during NVT simulations, while in the NVE ensemble, this quantity is naturally conserved, maintaining an initial value
+of 0. Production simulations are conducted for 100 ps (200,000 steps) in the NVE ensemble to generate training data,
+and for 10 ns (20,000,000 steps) in the NVT ensemble for validation.
+Quartz
+Bulk α-quartz containing 162 atoms is simulated using the van Beest, Kramer, and Santen (BKS) potential [76] with
+truncated Coulomb interactions [77 ] and a timestep of 1 fs. The system is equilibrated to 300 K in two stages: first in
+the NpT ensemble at ambient pressure using the Berendsen barostat [78 ] for 10 ps (10,000 steps) with a relaxation time
+of 0.1 ps, then in the NVT ensemble for 50 ps (50,000 steps) with Nosé-Hoover chain thermostat [75] with 3 chains
+and a relaxation time of 0.1 ps. Production runs of 100 ps (100,000 steps) in the NVE ensemble are initiated from five
+configurations randomly sampled from the equilibrated NVT trajectory, selecting those within a ±10 K range of the
+target temperature. The minimum time separation between selected configurations is set to 0.1 ps. NVT simulations for
+comparison with TrajCast predictions are carried out using the CSVR thermostat [ 48] with a relaxation time of 100 fs
+and are performed for 15 ns (15,000,000 steps).
+Liquid Water
+Bulk water is modeled using a system of 64 water molecules in a cubic simulation box with a fixed length of 12.4172
+Å. Intramolecular and intermolecular interactions of water is described by the flexible version of the simple point
+charge (SPC) interaction potential [ 79 –81 ]. All MD simulations are carried out with a time-step of 0.5 fs. The system
+is equilibrated for 10 ps (20,000 steps) in the NVT ensemble using a Nosé-Hoover thermostat [75 ] with a relaxation
+time of 0.5 ps and a target temperature of 300 K. The temperature is calculated based on 3N − 3 degrees of freedom.
+Production runs of 50 ps (100,000 steps) in the NVE ensemble are initiated from five configurations randomly sampled
+from the equilibrated trajectory, selecting those within a ±20 K range of the target temperature. The minimum time
+separation between selected configurations is set to 0.1 ps. Simulations in the NVT ensemble are carried out using the
+CSVR thermostat [48] with a relaxation time of 50 fs and are performed for 2.5 ns (5,000,000 steps).
+Model Size and Hyperparameters
+All equivariant MPNNs in this work use both even (p = 1) and odd (p = −1) parity features up to an rotation
+order of lmax = 2 creating a feature vector scalars, vectors, and higher-order tensors. We use 64 channels per
+object, resulting in a feature vector described as a direct sum of irreps and expressed in e3nn [ 55 ] notation as 64 x
+0o + 64 x 0e + 64 x 1o + 64 x 1e +64 x 2o + 64 x 2e, where each term specifies the multiplicity (first
+number), rotation order l, and parity p (o for odd, e for even). For all experiments, we employ 4 message passing
+layers and use SiLU and tanh as activation functions in the non-linear gates [ 52] for even and odd invariants, respectively.
+The TrajCast MPNN contains approximately 2.2M learnable weights, most of which reside in the MLPs that process
+the radial embeddings of edge and velocity magnitudes. Each MLP comprises three hidden layers with 64 neurons per
+layer and uses SiLU activation functions. Identical to NequIP [22], for the radial embedding of the edge lengths we use
+8 learnable Bessel functions and a polynomial cutoff with p = 6 [49 ]. Similarly, 8 Gaussian basis functions are used
+to generate the encoding of atomic velocity magnitudes. The element-specific velocity encoding from equation 1 is
+concatenated with the chemical species embeddings of each node to form the initial features passed to the first message
+12
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+passing layer.
+The cutoff radius for defining edges between nodes varies by system and is set to 4.0 Å, 4.5 Å, and 6.0 Å for
+paracetamol, quartz, and liquid water, respectively. The upper bound of the radial embedding of the velocities is
+determined by the lightest element, Zmin (hydrogen for water and paracetamol, oxygen for quartz), which governs the
+maximum velocity. For this element, we calculate the theoretical expectation value of the RMS velocity, vMB
+RMS,Zmin ,
+based on the Maxwell-Boltzmann distribution. When training across multiple temperatures, we recommend computing
+the RMS velocity for the highest temperature. We found that the upper limit of the encoding works then best when set
+to values between 3.5 × vMB
+RMS,Zmin and 5 × vMB
+RMS,Zmin .
+In all models, we refine the velocities predicted by the readout to remove any excess total linear momentum. While
+angular momentum can be easily removed for isolated molecules such as paracetamol, a proper treatment is needed for
+periodic systems like bulk quartz or liquid water, where particles crossing boundaries and interacting with periodic
+images can introduce discontinuities and torques. A common approach is to treat the simulation box as an open system,
+as suggested by Kuzkin [ 82 ]. However, for bulk systems investigated here, angular momentum conservation is typically
+not a significant concern compared to more complex systems such as interfaces or multiphase systems, due to their
+isotropic nature and symmetric forces. In fact, we find that all MPNNs perform well even without additional constraints,
+with no significant excess angular momentum generated during the roll-out.
+Training
+All models are trained based on the loss function
+L = 1
+3 PNb
+b=1 Na
+NbX
+b=1
+NaX
+i=1
+λd
+ c∆ri,α − ∆ri,α
+2
++ λv (ˆvi,α − vi,α)2 (8)
+where Nb denotes the batch size, Na is the number of atoms in each configuration within the batch, c∆ri,α and c∆vi,α
+represent the predicted α-component of the displacement and velocity of atom i, respectively, and λd and λv control the
+relative weighting of the displacement and velocity mean squared errors (MSE). For all experiments and independent of
+the chosen prediction horizon of the model, we assign equal weights λd = λv = 0.5. The target vectors are normalized
+by their root mean square (RMS) computed over the entire training set, and the model’s predictions are rescaled to
+match the correct magnitude.
+The weights are optimized with the Adam optimizer [83 ] using AMSGrad [84 ] and default values for β1 = 0.9 and
+β2 = 0.999. The number of training samples varies across experiments, with models trained on 1,000, 5,000, and
+10,000 configurations of paracetamol, and 500, 2,500, and 5,000 snapshots of quartz and liquid water. The results
+reported in the experiments correspond to models trained on the maximum sample size, unless stated otherwise. All
+training configurations are drawn randomly from three independent NVE trajectories of each system. The validation set
+comprises a quarter of the training set size, and a fixed hold-out test set of 1,000 configurations is used to compute final
+accuracy metrics. Both validation and test set are sampled from independent trajectories, ensuring no overlap with the
+training set.
+Irrespective of the training set size, a batch size of 10 for molecules and 2 for the condensed matter systems is used. The
+initial learning rate of 0.01 is adjusted by an on-plateau scheduler that reduced the rate by a factor of 0.8 if the validation
+loss does not improve over 20 epochs. Training continues for a maximum of 1,500 epochs, with early stopping if no
+validation loss reduction is observed over 100 epochs. Hyperparameters for the optimizer, learning rate, and batch
+size are optimized for the best balance between training time and model performance on the largest training set and
+prediction horizons. Every experiment is performed using double precision. Both the model and training routine are
+implemented using the PyTorch library [ 85 ]. All models are trained on a single NVIDIA V100-SXM2-32GB GPU,
+with training durations of up to 5, 10, and 11 days for paracetamol, quartz, and water, respectively, many completing
+earlier due to early stopping.
+Trajectory Forecasting
+All trajectories generated using TrajCast are produced autoregressively by rolling out the predictions of the MPNN, with
+velocities being rescaled after each step using a CSVR thermostat [ 48 ]. As in classical MD simulations, the relaxation
+time of the thermostat, τ , plays a crucial role and must be carefully chosen. In section B.1 of the SI, we explore
+13
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+how TrajCast behaves with different values of τ for all systems and varying ∆t. We find that for larger prediction
+horizons, much lower relaxation times are required compared to typical MD values to maintain the target temperature
+and fluctuations. This is likely due to TrajCast implicitly performing multiple timesteps before rescaling, whereas in
+MD, velocities are rescaled after each step. For the reported experiments, we set τ to 10 × ∆t (70 fs) for paracetamol,
+2.5 × ∆t (75 fs) for α-quartz, and 10 × ∆t (50 fs) for liquid water. The target temperature for all systems is 300 K
+and is defined based on 3N − 6 and 3N − 3 degrees of freedom for paracetamol and the condensed matter systems,
+respectively. Initial velocities are sampled from a Gaussian distribution at 300 K with zero net linear and angular
+momentum. For paracetamol, the net angular momentum is zeroed every 100 forward passes to correct for the excess
+angular momentum induced by the CSVR thermostat. For paracetamol we produce a trajectory of 7 ns (1,000,000
+forward passes), while for water and quartz, the roll-out is performed over 500,000 iterations, corresponding to 2 ns and
+15 ns, respectively. All systems are equilibrated for 10% of the total number of forward passes used for production.
+In addition to PyTorch [ 85 ], e3nn [55 ], and cuEquivariance, we also use the ASE [86] python package to efficiently
+generate and save the trajectories.
+Data and Code Availability
+An open-source implementation of TrajCast is available at https://github.com/IBM/trajcast for training models
+and performing trajectory forecasting. The model weights used in the experiments on various chemical systems are
+available at https://huggingface.co/ibm-research/trajcast.models-arxiv2025. The training, validation,
+and testing datasets for these experiments can be accessed at https://huggingface.co/datasets/ibm-research/
+trajcast.datasets-arxiv2025.
+Acknowledgements
+The authors thank Benjamin I. Tan, Christoph Schran, Clyde Fare, Edward O. Pyzer-Knapp, Eldad Haber, Johannes
+Brandstetter, Lior Horesh, Ljiljana Stojanovic, and Will Trojak for fruitful discussions. This work was supported by the
+Hartree National Centre for Digital Innovation, a collaboration between the Science and Technology Facilities Council
+and IBM.
+Author Contributions
+F.L.T. designed research; F.L.T., T.R. and M.E. performed experiments; F.L.T., T.R., and M.E. wrote the code; F.L.T.,
+J.D.O.-P., T.T., and F.M. generated data; all authors analyzed data; and all authors wrote the paper.
+Competing Interests
+The authors declare no competing interest.
+References
+[1] Michael Levitt and Arieh Warshel. Computer simulation of protein folding. Nature, 253(5494):694–698, February
+1975.
+[2] Kresten Lindorff-Larsen, Stefano Piana, Ron O. Dror, and David E. Shaw. How Fast-Folding Proteins Fold.
+Science, 334(6055):517–520, October 2011.
+[3] Xiao Dong, Artem R. Oganov, Alexander F. Goncharov, Elissaios Stavrou, Sergey Lobanov, Gabriele Saleh,
+Guang-Rui Qian, Qiang Zhu, Carlo Gatti, Volker L. Deringer, Richard Dronskowski, Xiang-Feng Zhou, Vitali B.
+Prakapenka, Zuzana Konôpková, Ivan A. Popov, Alexander I. Boldyrev, and Hui-Tian Wang. A stable compound
+of helium and sodium at high pressure. Nature Chem, 9(5):440–445, May 2017.
+[4] C. Cavazzoni, G. L. Chiarotti, S. Scandolo, E. Tosatti, M. Bernasconi, and M. Parrinello. Superionic and Metallic
+States of Water and Ammonia at Giant Planet Conditions. Science, 283(5398):44–46, January 1999.
+[5] Jiming Sun, Bryan K. Clark, Salvatore Torquato, and Roberto Car. The phase diagram of high-pressure superionic
+ice. Nat Commun, 6(1):8156, August 2015.
+[6] Maria Rescigno, Alberto Toffano, Umbertoluca Ranieri, Leon Andriambariarijaona, Richard Gaal, Stefan Klotz,
+Michael Marek Koza, Jacques Ollivier, Fausto Martelli, John Russo, Francesco Sciortino, Jose Teixeira, and
+Livia Eleonora Bove. Observation of Plastic Ice VII by Quasi-Elastic Neutron Scattering. Nature, February 2025.
+14
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+[7] Srikanth Sastry and C. Austen Angell. Liquid–liquid phase transition in supercooled silicon. Nature Mater,
+2(11):739–743, November 2003.
+[8] Peter H. Poole, Francesco Sciortino, Ulrich Essmann, and H. Eugene Stanley. Phase behaviour of metastable
+water. Nature, 360(6402):324–328, November 1992.
+[9] Jeremy C. Palmer, Fausto Martelli, Yang Liu, Roberto Car, Athanassios Z. Panagiotopoulos, and Pablo G.
+Debenedetti. Metastable liquid–liquid transition in a molecular model of water. Nature, 510(7505):385–388, June
+2014.
+[10] Alexander Rosu-Finsen, Michael B. Davies, Alfred Amon, Han Wu, Andrea Sella, Angelos Michaelides, and
+Christoph G. Salzmann. Medium-density amorphous ice. Science, 379(6631):474–478, February 2023.
+[11] Giuseppe Cassone and Fausto Martelli. Electrofreezing of liquid water at ambient conditions. Nat Commun,
+15(1):1856, February 2024.
+[12] Zhao Fan and Hajime Tanaka. Microscopic mechanisms of pressure-induced amorphous-amorphous transitions
+and crystallisation in silicon. Nat Commun, 15(1):368, January 2024.
+[13] Albert Musaelian, Anders Johansson, Simon Batzner, and Boris Kozinsky. Scaling the leading accuracy of deep
+equivariant models to biomolecular simulations of realistic size, April 2023. arXiv:2304.10061 [physics, q-bio].
+[14] Venkat Kapil, Christoph Schran, Andrea Zen, Ji Chen, Chris J. Pickard, and Angelos Michaelides. The first-
+principles phase diagram of monolayer nanoconfined water. Nature, 609(7927):512–516, September 2022.
+[15] Volker L. Deringer, Noam Bernstein, Gábor Csányi, Chiheb Ben Mahmoud, Michele Ceriotti, Mark Wilson,
+David A. Drabold, and Stephen R. Elliott. Origins of structural and electronic transitions in disordered silicon.
+Nature, 589(7840):59–64, January 2021.
+[16] Jörg Behler and Michele Parrinello. Generalized Neural-Network Representation of High-Dimensional Potential-
+Energy Surfaces. Phys. Rev. Lett., 98(14):146401, April 2007.
+[17] Albert P. Bartók, Mike C. Payne, Risi Kondor, and Gábor Csányi. Gaussian Approximation Potentials: The
+Accuracy of Quantum Mechanics, without the Electrons. Phys. Rev. Lett., 104(13):136403, April 2010.
+[18] Kristof Schütt, Pieter-Jan Kindermans, Huziel Enoc Sauceda Felix, Stefan Chmiela, Alexandre Tkatchenko,
+and Klaus-Robert Müller. SchNet: A continuous-filter convolutional neural network for modeling quantum
+interactions. In Advances in Neural Information Processing Systems, volume 30, pages 992 – 1002, 2017.
+[19] Oliver T. Unke and Markus Meuwly. PhysNet: A Neural Network for Predicting Energies, Forces, Dipole
+Moments, and Partial Charges. J. Chem. Theory Comput., 15(6):3678–3693, June 2019.
+[20] Ralf Drautz. Atomic cluster expansion for accurate and transferable interatomic potentials. Phys. Rev. B,
+99(1):014104, January 2019.
+[21] Oliver T. Unke, Stefan Chmiela, Michael Gastegger, Kristof T. Schütt, Huziel E. Sauceda, and Klaus-Robert
+Müller. SpookyNet: Learning force fields with electronic degrees of freedom and nonlocal effects. Nat Commun,
+12(1):7273, December 2021.
+[22] Simon Batzner, Albert Musaelian, Lixin Sun, Mario Geiger, Jonathan P. Mailoa, Mordechai Kornbluth, Nicola
+Molinari, Tess E. Smidt, and Boris Kozinsky. E(3)-Equivariant Graph Neural Networks for Data-Efficient and
+Accurate Interatomic Potentials. Nat Commun, 13(1):2453, 2022.
+[23] Ilyes Batatia, Simon Batzner, Dávid Péter Kovács, Albert Musaelian, Gregor N. C. Simm, Ralf Drautz, Christoph
+Ortner, Boris Kozinsky, and Gábor Csányi. The design space of E(3)-equivariant atom-centred interatomic
+potentials. Nat Mach Intell, 7(1):56–67, 2025.
+[24] Ilyes Batatia, David P Kovacs, Gregor Simm, Christoph Ortner, and Gabor Csanyi. MACE: Higher Order
+Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields. In Advances in Neural
+Information Processing Systems, volume 35, pages 11423–11436, 2022.
+[25] Albert Musaelian, Simon Batzner, Anders Johansson, Lixin Sun, Cameron J. Owen, Mordechai Kornbluth, and
+Boris Kozinsky. Learning local equivariant representations for large-scale atomistic dynamics. Nat Commun,
+14(1):579, February 2023.
+[26] Stefan Chmiela, Valentin Vassilev-Galindo, Oliver T. Unke, Adil Kabylda, Huziel E. Sauceda, Alexandre
+Tkatchenko, and Klaus-Robert Müller. Accurate global machine learning force fields for molecules with hundreds
+of atoms. Sci. Adv., 9(2):eadf0873, January 2023.
+[27] Stephen R. Xie, Matthias Rupp, and Richard G. Hennig. Ultra-fast interpretable machine-learning potentials. npj
+Comput Mater, 9(1):162, September 2023.
+15
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+[28] Volker L. Deringer, Miguel A. Caro, and Gábor Csányi. Machine Learning Interatomic Potentials as Emerging
+Tools for Materials Science. Advanced Materials, 31(46):1902765, November 2019.
+[29] Oliver T. Unke, Stefan Chmiela, Huziel E. Sauceda, Michael Gastegger, Igor Poltavsky, Kristof T. Schütt,
+Alexandre Tkatchenko, and Klaus-Robert Müller. Machine Learning Force Fields. Chem. Rev., 121(16):10142–
+10186, August 2021.
+[30] Jörg Behler. Four Generations of High-Dimensional Neural Network Potentials. Chem. Rev., 121(16):10037–
+10072, August 2021.
+[31] Fabian L Thiemann, Niamh O’Neill, Venkat Kapil, Angelos Michaelides, and Christoph Schran. Introduction to
+machine learning potentials for atomistic simulations. J. Phys.: Condens. Matter, 37(7):073002, February 2025.
+[32] Chi Chen, Weike Ye, Yunxing Zuo, Chen Zheng, and Shyue Ping Ong. Graph Networks as a Universal Machine
+Learning Framework for Molecules and Crystals. Chem. Mater., 31(9):3564–3572, May 2019.
+[33] Chi Chen and Shyue Ping Ong. A universal graph deep learning interatomic potential for the periodic table. Nat
+Comput Sci, 2(11):718–728, November 2022.
+[34] Amil Merchant, Simon Batzner, Samuel S. Schoenholz, Muratahan Aykol, Gowoon Cheon, and Ekin Dogus
+Cubuk. Scaling deep learning for materials discovery. Nature, 624(7990):80–85, December 2023.
+[35] Han Yang, Chenxi Hu, Yichi Zhou, Xixian Liu, Yu Shi, Jielan Li, Guanzhi Li, Zekun Chen, Shuizhou Chen,
+Claudio Zeni, Matthew Horton, Robert Pinsler, Andrew Fowler, Daniel Zügner, Tian Xie, Jake Smith, Lixin Sun,
+Qian Wang, Lingyu Kong, Chang Liu, Hongxia Hao, and Ziheng Lu. MatterSim: A Deep Learning Atomistic
+Model Across Elements, Temperatures and Pressures, May 2024. arXiv:2405.04967 [cond-mat].
+[36] Ilyes Batatia, Philipp Benner, Yuan Chiang, Alin M. Elena, Dávid P. Kovács, Janosh Riebesell, Xavier R.
+Advincula, Mark Asta, Matthew Avaylon, William J. Baldwin, Fabian Berger, Noam Bernstein, Arghya Bhowmik,
+Samuel M. Blau, Vlad C˘arare, James P. Darby, Sandip De, Flaviano Della Pia, Volker L. Deringer, Rokas Elijošius,
+Zakariya El-Machachi, Fabio Falcioni, Edvin Fako, Andrea C. Ferrari, Annalena Genreith-Schriever, Janine
+George, Rhys E. A. Goodall, Clare P. Grey, Petr Grigorev, Shuang Han, Will Handley, Hendrik H. Heenen,
+Kersti Hermansson, Christian Holm, Jad Jaafar, Stephan Hofmann, Konstantin S. Jakob, Hyunwook Jung, Venkat
+Kapil, Aaron D. Kaplan, Nima Karimitari, James R. Kermode, Namu Kroupa, Jolla Kullgren, Matthew C. Kuner,
+Domantas Kuryla, Guoda Liepuoniute, Johannes T. Margraf, Ioan-Bogdan Magd˘au, Angelos Michaelides, J. Harry
+Moore, Aakash A. Naik, Samuel P. Niblett, Sam Walton Norwood, Niamh O’Neill, Christoph Ortner, Kristin A.
+Persson, Karsten Reuter, Andrew S. Rosen, Lars L. Schaaf, Christoph Schran, Benjamin X. Shi, Eric Sivonxay,
+Tamás K. Stenczel, Viktor Svahn, Christopher Sutton, Thomas D. Swinburne, Jules Tilly, Cas van der Oord,
+Eszter Varga-Umbrich, Tejs Vegge, Martin Vondrák, Yangshuai Wang, William C. Witt, Fabian Zills, and Gábor
+Csányi. A foundation model for atomistic materials chemistry, March 2024. arXiv:2401.00096 [cond-mat,
+physics:physics].
+[37] Mark E. Tuckerman, Glenn J. Martyna, and Bruce J. Berne. Molecular dynamics algorithm for condensed systems
+with multiple time scales. The Journal of Chemical Physics, 93(2):1287–1291, July 1990.
+[38] M. Tuckerman, B. J. Berne, and G. J. Martyna. Reversible multiple time scale molecular dynamics. The Journal
+of Chemical Physics, 97(3):1990–2001, August 1992.
+[39] Xiang Fu, Albert Musaelian, Anders Johansson, Tommi Jaakkola, and Boris Kozinsky. Learning Interatomic
+Potentials at Multiple Scales, October 2023. arXiv:2310.13756 [physics].
+[40] Frank Noé, Simon Olsson, Jonas Köhler, and Hao Wu. Boltzmann generators: Sampling equilibrium states of
+many-body systems with deep learning. Science, 365(6457):eaaw1147, September 2019.
+[41] Ludwig Winkler, Klaus-Robert Müller, and Huziel E Sauceda. High-fidelity molecular dynamics trajectory
+reconstruction with bi-directional neural networks. Mach. Learn.: Sci. Technol., 3(2):025011, June 2022.
+[42] J C S Kadupitiya, Geoffrey C Fox, and Vikram Jadhao. Solving Newton’s equations of motion with large timesteps
+using recurrent neural networks based operators. Mach. Learn.: Sci. Technol., 3(2):025002, June 2022.
+[43] Leon Klein, Andrew Y. K. Foong, Tor Erlend Fjelde, Bruno Mlodozeniec, Marc Brockschmidt, Sebastian Nowozin,
+Frank Noé, and Ryota Tomioka. Timewarp: transferable acceleration of molecular dynamics by learning time-
+coarsened dynamics. In Proceedings of the 37th International Conference on Neural Information Processing
+Systems, 2023.
+[44] Mathias Schreiner, Ole Winther, and Simon Olsson. Implicit transfer operator learning: Multiple time-resolution
+models for molecular dynamics. In Advances in Neural Information Processing Systems, volume 36, pages
+36449–36462, 2023.
+[45] Bowen Jing, Hannes Stärk, Tommi Jaakkola, and Bonnie Berger. Generative Modeling of Molecular Dynamics
+Trajectories, September 2024. arXiv:2409.17808 [cs, q-bio].
+16
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+[46] Minkai Xu, Jiaqi Han, Aaron Lou, Jean Kossaifi, Arvind Ramanathan, Kamyar Azizzadenesheli, Jure Leskovec,
+Stefano Ermon, and Anima Anandkumar. Equivariant Graph Neural Operator for Modeling 3D Dynamics, June
+2024. arXiv:2401.11037 [cs].
+[47] Xiang Fu, Tian Xie, Nathan J. Rebello, Bradley Olsen, and Tommi S. Jaakkola. Simulate Time-integrated
+Coarse-grained Molecular Dynamics with Multi-scale Graph Networks. Transactions on Machine Learning
+Research, 2023.
+[48] Giovanni Bussi, Davide Donadio, and Michele Parrinello. Canonical sampling through velocity rescaling. The
+Journal of Chemical Physics, 126(1):014101, January 2007.
+[49] Johannes Gasteiger, Janek Groß, and Stephan Günnemann. Directional Message Passing for Molecular Graphs.
+In International Conference on Learning Representations (ICLR), 2020.
+[50] Nathaniel Thomas, Tess Smidt, Steven Kearnes, Lusann Yang, Li Li, Kai Kohlhoff, and Patrick Riley. Tensor field
+networks: Rotation- and translation-equivariant neural networks for 3D point clouds, May 2018. arXiv:1802.08219
+[cs].
+[51] Johannes Brandstetter, Rob Hesselink, Elise van der Pol, Erik J Bekkers, and Max Welling. Geometric and physical
+quantities improve e(3) equivariant message passing. In International Conference on Learning Representations,
+2022.
+[52] Maurice Weiler, Mario Geiger, Max Welling, Wouter Boomsma, and Taco S Cohen. 3D Steerable CNNs: Learning
+Rotationally Equivariant Features in Volumetric Data. In Advances in Neural Information Processing Systems,
+2018.
+[53] Dávid Péter Kovács, Ilyes Batatia, Eszter Sára Arany, and Gábor Csányi. Evaluation of the MACE force field
+architecture: From medicinal chemistry to materials science. The Journal of Chemical Physics, 159(4):044118,
+July 2023.
+[54] Kimberly Stachenfeld, Drummond B Fielding, Dmitrii Kochkov, Miles Cranmer, Tobias Pfaff, Jonathan Godwin,
+Can Cui, Shirley Ho, Peter Battaglia, and Alvaro Sanchez-Gonzalez. LEARNED COARSE MODELS FOR
+EFFICIENT TURBULENCE SIMULATION. In International Conference on Learning Representations (ICLR),
+2022.
+[55] Mario Geiger and Tess Smidt. e3nn: Euclidean Neural Networks, July 2022. arXiv:2207.09453 [cs].
+[56] Stefan Chmiela, Alexandre Tkatchenko, Huziel E. Sauceda, Igor Poltavsky, Kristof T. Schütt, and Klaus-Robert
+Müller. Machine learning of accurate energy-conserving molecular force fields. Sci. Adv., 3(5):e1603015, May
+2017.
+[57] Anders S Christensen and O Anatole Von Lilienfeld. On the role of gradients for machine learning of molecular
+energies and forces. Mach. Learn.: Sci. Technol., 1(4):045018, October 2020.
+[58] Christoph Schran, Fabian L. Thiemann, Patrick Rowe, Erich A. Müller, Ondrej Marsalek, and Angelos
+Michaelides. Machine learning potentials for complex aqueous systems made simple. Proc. Natl. Acad. Sci.
+U.S.A., 118(38):e2110077118, September 2021.
+[59] Ondrej Marsalek and Thomas E. Markland. Quantum Dynamics and Spectroscopy of Ab Initio Liquid Water: The
+Interplay of Nuclear and Electronic Quantum Effects. J. Phys. Chem. Lett., 8(7):1545–1551, April 2017.
+[60] C. A. Angell. Formation of Glasses from Liquids and Biopolymers. Science, 267(5206):1924–1935, March 1995.
+Publisher: American Association for the Advancement of Science.
+[61] Pablo G. Debenedetti and Frank H. Stillinger. Supercooled liquids and the glass transition. Nature, 410(6825):259–
+267, March 2001.
+[62] Camille Scalliet, Benjamin Guiselin, and Ludovic Berthier. Thirty Milliseconds in the Life of a Supercooled
+Liquid. Phys. Rev. X, 12(4):041028, December 2022.
+[63] Kevin Stokely, Marco G. Mazza, H. Eugene Stanley, and Giancarlo Franzese. Effect of hydrogen bond cooperativity
+on the behavior of water. Proc. Natl. Acad. Sci. U.S.A., 107(4):1301–1306, January 2010.
+[64] Penghua Ying, Cheng Qian, Rui Zhao, Yanzhou Wang, Ke Xu, Feng Ding, Shunda Chen, and
+Zheyong Fan. Advances in modeling complex materials: The rise of neuroevolution potentials.
+Chemical Physics Reviews, 6(1):011310, March 2025. _eprint: https://pubs.aip.org/aip/cpr/article-
+pdf/doi/10.1063/5.0259061/20445326/011310_1_5.0259061.pdf.
+[65] Joel Hestness, Sharan Narang, Newsha Ardalani, Gregory Diamos, Heewoo Jun, Hassan Kianinejad,
+Md Mostofa Ali Patwary, Yang Yang, and Yanqi Zhou. Deep Learning Scaling is Predictable, Empirically,
+December 2017. arXiv:1712.00409 [cs].
+17
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+[66] Remi Lam, Alvaro Sanchez-Gonzalez, Matthew Willson, Peter Wirnsberger, Meire Fortunato, Ferran Alet, Suman
+Ravuri, Timo Ewalds, Zach Eaton-Rosen, Weihua Hu, Alexander Merose, Stephan Hoyer, George Holland, Oriol
+Vinyals, Jacklynn Stott, Alexander Pritzel, Shakir Mohamed, and Peter Battaglia. Learning skillful medium-range
+global weather forecasting. Science, 382(6677):1416–1421, December 2023.
+[67] F. Sciortino, Y. Zhai, S. L. Bore, and F. Paesani. Constraints on the location of the liquid–liquid critical point in
+water. Nat. Phys., 21(3):480–485, March 2025.
+[68] Justin Gilmer, Samuel S Schoenholz, Patrick F Riley, Oriol Vinyals, and George E Dahl. Neural Message Passing
+for Quantum Chemistry. In Proceedings of the 34th International Conference on Machine Learning, Sydney,
+Australia, 2017.
+[69] Efrem Braun, Seyed Mohamad Moosavi, and Berend Smit. Anomalous Effects of Velocity Rescaling Algorithms:
+The Flying Ice Cube Effect Revisited. J. Chem. Theory Comput., 14(10):5262–5272, October 2018.
+[70] Steve Plimpton. Fast Parallel Algorithms for Short-Range Molecular Dynamics. Journal of Computational
+Physics, 117(1):1–19, March 1995.
+[71] Aidan P. Thompson, H. Metin Aktulga, Richard Berger, Dan S. Bolintineanu, W. Michael Brown, Paul S. Crozier,
+Pieter J. In ’T Veld, Axel Kohlmeyer, Stan G. Moore, Trung Dac Nguyen, Ray Shan, Mark J. Stevens, Julien
+Tranchida, Christian Trott, and Steven J. Plimpton. LAMMPS - a flexible simulation tool for particle-based
+materials modeling at the atomic, meso, and continuum scales. Computer Physics Communications, 271:108171,
+February 2022.
+[72] William L. Jorgensen and Julian Tirado-Rives. The OPLS [optimized potentials for liquid simulations] potential
+functions for proteins, energy minimizations for crystals of cyclic peptides and crambin. J. Am. Chem. Soc.,
+110(6):1657–1666, March 1988.
+[73] Michael J. Robertson, Julian Tirado-Rives, and William L. Jorgensen. Improved Peptide and Protein Torsional
+Energetics with the OPLS-AA Force Field. J. Chem. Theory Comput., 11(7):3499–3509, July 2015.
+[74] Andrew I. Jewett, David Stelter, Jason Lambert, Shyam M. Saladi, Otello M. Roscioni, Matteo Ricci, Ludovic
+Autin, Martina Maritan, Saeed M. Bashusqeh, Tom Keyes, Remus T. Dame, Joan-Emma Shea, Grant J. Jensen,
+and David S. Goodsell. Moltemplate: A Tool for Coarse-Grained Modeling of Complex Biological Matter and
+Soft Condensed Matter Physics. Journal of Molecular Biology, 433(11):166841, May 2021.
+[75] Glenn J. Martyna, Michael L. Klein, and Mark Tuckerman. Nosé–Hoover chains: The canonical ensemble via
+continuous dynamics. The Journal of Chemical Physics, 97(4):2635–2643, August 1992.
+[76] B. W. H. van Beest, G. J. Kramer, and R. A. van Santen. Force fields for silicas and aluminophosphates based on
+ab initio calculations. Phys. Rev. Lett., 64(16):1955–1958, April 1990. Publisher: American Physical Society.
+[77] Antoine Carré, Ludovic Berthier, Jürgen Horbach, Simona Ispas, and Walter Kob. Amorphous silica modeled with
+truncated and screened Coulomb interactions: A molecular dynamics simulation study. The Journal of Chemical
+Physics, 127(11):114512, September 2007.
+[78] H. J. C. Berendsen, J. P. M. Postma, W. F. van Gunsteren, A. DiNola, and J. R. Haak. Molecular dynamics with
+coupling to an external bath. The Journal of Chemical Physics, 81(8):3684–3690, October 1984.
+[79] Kahled Toukan and Aneesur Rahman. Molecular-dynamics study of atomic motions in water. Phys. Rev. B,
+31(5):2643–2648, March 1985. Publisher: American Physical Society.
+[80] Yujie Wu, Harald L. Tepper, and Gregory A. Voth. Flexible simple point-charge water model with improved
+liquid-state properties. The Journal of Chemical Physics, 124(2):024503, January 2006.
+[81] Konstantin Smirnov. A molecular dynamics study of the interaction of water with external surface of silicalite-1.
+Phys. Chem. Chem. Phys., 19, January 2016.
+[82] Vitaly A. Kuzkin. On angular momentum balance for particle systems with periodic boundary conditions. Z
+Angew Math Mech, 95(11):1290–1295, November 2015. arXiv:1312.7008 [physics].
+[83] Diederik P. Kingma and Jimmy Ba. Adam: A Method for Stochastic Optimization, January 2017. arXiv:1412.6980
+[cs].
+[84] Sashank J. Reddi, Satyen Kale, and Sanjiv Kumar. On the Convergence of Adam and Beyond, April 2019.
+arXiv:1904.09237 [cs].
+[85] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen,
+Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Yang, Zach DeVito,
+Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala.
+PyTorch: An Imperative Style, High-Performance Deep Learning Library, December 2019. arXiv:1912.01703
+[cs].
+18
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+[86] Ask Hjorth Larsen, Jens Jørgen Mortensen, Jakob Blomqvist, Ivano E Castelli, Rune Christensen, Marcin Dułak,
+Jesper Friis, Michael N Groves, Bjørk Hammer, Cory Hargus, Eric D Hermes, Paul C Jennings, Peter Bjerre Jensen,
+James Kermode, John R Kitchin, Esben Leonhard Kolsbjerg, Joseph Kubal, Kristen Kaasbjerg, Steen Lysgaard,
+Jón Bergmann Maronsson, Tristan Maxson, Thomas Olsen, Lars Pastewka, Andrew Peterson, Carsten Rostgaard,
+Jakob Schiøtz, Ole Schütt, Mikkel Strange, Kristian S Thygesen, Tejs Vegge, Lasse Vilhelmsen, Michael Walter,
+Zhenhua Zeng, and Karsten W Jacobsen. The atomic simulation environment—a Python library for working with
+atoms. J. Phys.: Condens. Matter, 29(27):273002, July 2017.
+[87] Daan Frenkel and Berend Smit. Understanding Molecular Simulation. Elsevier, 2nd edition, 2002.
+[88] J. Hickman and Y. Mishin. Temperature fluctuations in canonical systems: Insights from molecular dynamics
+simulations. Phys. Rev. B, 94(18):184311, November 2016.
+19
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Supplementary Information
+In this supplementary information, we provide further details on specific aspects of the study presented in the manuscript.
+This includes additional metrics to evaluate the proposed methodology, as well as various aspects related to inference
+and generating new trajectories.
+Contents
+A Model Performance S2
+A.1 Mean Absolute Errors for Displacements and Velocities . . . . . . . . . . . . . . . . . . . . . . . . . S2
+A.2 Learning Curves Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . S2
+B Trajectory Forecasting S4
+B.1 Thermostat Relaxation Time . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . S4
+B.2 Forecasting at Constant Energy . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . S5
+B.3 Forecasting Efficiency . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . S6
+S1
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+A Model Performance
+In this section, we provide additional details supporting the validation of our framework as presented in the manuscript.
+Specifically, we include an overview of the mean absolute error (MAE) across all systems for message passing neural
+networks (MPNNs) trained on the largest pool of training configurations. Furthermore, we present additional results of
+the scalability and learning curve experiments to examine the impact of the prediction horizon and data efficiency.
+A.1 Mean Absolute Errors for Displacements and Velocities
+Here, we report the MAE for displacements and velocities predicted by the equivariant MPNNs for all systems
+investigated in the manuscript for a range of prediction horizons ∆t. Detailed results are provided in Table S1. The
+MAEs are calculated using ∆t-specific hold-out test sets, each comprising 1, 000 atomic snapshots sampled from NVE
+trajectories not used for training or validation. In addition to the absolute errors, we also report them relative to the
+mean absolute values of the displacement and velocity vectors. This is important, as the average magnitude of the
+displacement vector is strongly dependent on the chosen prediction interval ∆t. While we performed experiments with
+varying training set sizes and three different seeds, here we report the best models obtained with the largest number of
+training training samples.
+Table S1: Displacement and velocity MAE for the systems studied at varying prediction horizons ∆t. Models for
+paracetamol were trained on a dataset of 10, 000 atomic structures, whereas models for α-quartz and liquid water had a
+training budget of 5, 000 samples each. The MAEs are computed for hold-out test sets with varying ∆t comprising
+1, 000 configurations, respectively. Beyond absolute values in [Å] and [Å/fs], we also report the errors relative to mean
+absolute displacement and velocity of the test set.
+System Prediction horizon ∆t [fs] Displacement Velocity
+Abs [10−5 × Å] Rel [%] Abs [10−5 × Å/fs] Rel [%]
+Paracetamol
+0.5 0.15 0.04 0.52 0.07
+1.0 0.41 0.06 0.71 0.10
+2.0 1.56 0.11 1.42 0.20
+3.0 3.59 0.17 2.12 0.29
+5.0 7.98 0.24 3.05 0.42
+7.0 15.89 0.38 4.92 0.68
+10.0 31.91 0.59 7.88 1.08
+15.0 76.07 1.09 14.07 1.93
+Quartz
+1.0 0.16 0.06 0.32 0.11
+2.0 0.66 0.11 0.64 0.22
+5.0 4.71 0.33 1.80 0.63
+10.0 18.51 0.69 3.37 1.18
+20.0 66.90 1.50 6.77 2.36
+30.0 141.24 2.52 11.37 3.96
+50.0 380.39 5.51 25.13 8.76
+Water
+0.5 0.08 0.02 0.31 0.03
+1.0 0.24 0.03 0.45 0.05
+2.0 0.91 0.05 0.88 0.09
+5.0 6.99 0.17 3.46 0.37
+7.0 15.38 0.29 6.38 0.68
+10.0 47.23 0.67 15.25 1.63
+15.0 199.04 2.04 43.47 4.64
+20.0 507.98 4.30 84.37 9.11
+A.2 Learning Curves Experiments
+In this section we provide a full overview of the learning curves for both displacements and velocities. The relative
+displacement and velocity MAEs for all systems and investigated MD time-step multiples (MTM) are shown as a
+S2
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+Figure S1: Learning curves capturing the relationship between model accuracy and training set size across
+chemical systems and MD time-step multiples. Top panels show the displacement MAE for paracetamol, quartz, and
+water, while the bottom panel displays the velocity MAE, both on a log-log scale. The MAEs were computed over
+a test set of 1,000 configurations and normalized by the mean of the displacements and velocities respectively. For
+each MTM and number of training samples we show the error for three models of identical architecture only differing
+in their initial weights and order they were fed with training samples. The continuous lines are fits to a power law to
+determine how fast the models learn when presented with additional data.
+function of number of training samples in Fig. S1. As in the manuscript, the MAEs are normalized by the mean
+of the respective property sampled over the test set comprising 1,000 configurations. Models were trained to 1,000,
+5,000, and 10,000 or 500, 2,500, and 5,000 configurations for paracetamol and the condensed matter systems quartz
+and water, respectively. For each combination of system, MTM, and number of training samples, we conducted three
+training runs to also study variation across different seeds. We then fitted a power law [65 ] MAE ∝ N s, where N is
+the number of training configurations and s corresponds to the exponent quantifying how much the model improves
+with more data, to the generated data which appear as straight lines with slope s in the log-log plot. This allows us to
+compare data efficiency across systems and prediction horizons. In the manuscript, we already discussed differences in
+the scaling behavior across systems and MTMs based on the velocity MAE. The displacement MAE shows almost
+the identical relationship with respect to the number of training data suggesting a very similar exponent s. We note,
+however, that the displacement MAE are consistently shifted to smaller MAEs across MTMs and number of training
+samples for all systems. While we assigned equal weights to velocities and displacements in the loss function, this
+suggests opportunities for further optimization in future work.
+S3
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+B Trajectory Forecasting
+While the previous section focused on single-step prediction accuracy, here we provide additional details related to the
+autoregressive roll-outs and trajectory generation. Specifically, we investigate the impact of thermostat strength over
+different prediction horizons, demonstrate the generation of stable trajectories in NVE for short periods, and benchmark
+TrajCast inference timings across systems.
+B.1 Thermostat Relaxation Time
+The relaxation time τ of a thermostat is a crucial parameter in classical MD simulations. If chosen too high, the
+thermostat cannot maintain the target temperature; if too low, it becomes overly strong, disrupting the system’s
+dynamics and fluctuations. Typically, τ is expressed relative to the integration time-step δt and is chosen to be
+≈ 100 − 1000 × δt. However, it is unclear if the same rule of thumb applies to the methodology introduced in the
+manuscript. While the CSVR thermostat [48 ] is designed to rescale velocities after each numerical integration step
+within the NVE ensemble, our trained MPNNs implicitly perform multiple NVE steps before rescaling the velocities.
+Here, we perform a comprehensive analysis for all systems reported in the manuscript, investigating how different
+relaxation times affect the temperature of trajectories generated with varying prediction horizons ∆t. Specifically,
+we focus on three relaxation times, τ = 10, 50, and 100 times ∆t, across various prediction horizons. For each
+combination of τ and ∆t, we generate three trajectories by rolling out the MPNNs trained at the respective ∆t in the
+NVT ensemble, varying the seed of the thermostat and the initial velocities. Each trajectory consists of 100, 000 steps,
+with the first half truncated for equilibration.
+In addition to the deviation of the ensemble average temperature, ⟨T ⟩, from the target temperature T0 = 300 K, we also
+evaluate the standard deviation of the temperature, σT , which is expected to follow the relationship [87, 88]:
+σT =
+r 2
+3N T0 (1)
+where N is the number of atoms in the system. An overview of these properties is provided in Fig. S2. While the
+thermostat achieves the correct target temperature and fluctuations independent of the chosen relaxation time for short
+Figure S2: Impact of thermostat relaxation time on temperature at different prediction intervals. Top panels
+show the absolute deviation from the target temperature T0 = 300 K for the three systems, while bottom panels show
+the temperature standard deviation, σT , computed from the trajectory. The purple lines correspond to the theoretical
+expectation for σT from equation 1. Errors bars represent twice the standard deviation across three different seeds. The
+dashed lines serve as guides to the eye.
+S4
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+prediction horizons, significant differences emerge when ∆t is increased. The weakest coupling (τ = 100 × ∆t) fails
+to maintain the target temperature for large prediction horizons, with deviations up to ≈ 15 K for paracetamol and
+≈ 40 K for quartz, respectively. While setting τ = 50 × ∆t reduces the error, only the strongest thermostat performs
+satisfactory with deviations ≤ 1 K, except for α-quartz using ∆t = 30 fs, which requires an even lower τ . We observe
+the same trends in temperature fluctuations based on the standard deviation, where for large prediction horizons, a weak
+thermostat introduces larger errors. Beyond affecting ensemble averages and properties, in the course of this work we
+observed that excessive deviations in the target temperature can induce instabilities. All this indicates that significantly
+smaller relative relaxation times are required when using large prediction horizons to accurately reproduce the NVT
+ensemble.
+B.2 Forecasting at Constant Energy
+While the CSVR thermostat enables TrajCast to generate trajectories at constant temperature within the canonical
+ensemble, the MPNNs driving our framework mimic the system’s temporal evolution in the NVE ensemble. Specifically,
+we trained these models to predict the new state after multiple steps of numerical integration of the equations of
+motion using the velocity Verlet algorithm. Although velocity rescaling stabilizes the roll-out, here, we show that our
+models can also generate stable trajectories without noise injection, closely following the MD reference. To this end,
+we autoregressively generate trajectories without a thermostat using MPNNs trained to paracetamol with prediction
+horizons of ∆t = 0.5 fs and ∆t = 7.0 fs, corresponding to MD time-step multiples (MTM) of 1 and 14, respectively,
+and compare them to a MD NVE trajectory started from the same state. Each trajectory was generated over 1,000 steps.
+Unlike benchmarking in the NVT ensemble, the lack of non-deterministic rescaling allows for a direct comparison
+Figure S3: Comparison of TrajCast and MD trajectories of paracetamol in the NVE ensemble. The MD trajectories
+were generated using a time-step of 0.5 fs and we compare to TrajCast roll-out based on prediction horizons of 0.5 fs
+and 7.0 fs, corresponding to MTMs of 1 and 14, respectively. The molecular snapshots on the left highlight different
+features such as interatomic distances and angles which are used to validate the model performance. The right panels
+show the respective metrics as a function of time of up to 500 fs corresponding to 1,000 MD steps.
+S5
+Force-Free Molecular Dynamics Through Autoregressive Equivariant Networks
+of the trajectories based on the divergence of atomic positions or velocities. Similar to [41 ], in Fig. S3, we compare
+specific interatomic distances and angles of paracetamol as a function of time. To resolve the model performance
+across different frequency ranges, we pick the oxygen-oxygen and nitrogen-hydrogen distances as well as the hydroxyl
+group angle. Across all metrics we find that both MPNNs achieve almost perfect agreement across the entire range
+of 500 fs. Despite these very encouraging results, however, we note that larger errors and instabilities could occur at
+longer timescales.
+B.3 Forecasting Efficiency
+Here, we evaluate the computational efficiency of our approach by measuring the number of steps and estimated
+trajectory length achievable per day across different systems. Specifically, we perform forecasting in the NVT ensemble
+for all three systems over 1,000 steps using the models from the experiments reported in the manuscript. To assess only
+the efficiency of forward passes and velocity rescaling, no frames are saved. For the condensed matter systems of
+quartz and liquid water, we additionally report these timings for 2 × 2 × 2 and 3 × 3 × 3 supercells. Throughout all
+systems, we made sure that the trajectories were stable. Timings were measured on a NVIDIA V100-SXM2-32GB
+GPU for the isolated atom and up to 2 × 2 × 2 supercells, while larger systems were benchmarked on an NVIDIA
+A100-SXM4-40GB GPU due to memory requirements for the largest water system. An overview of the system and
+timing details is provided in Table S2, where we report the fastest run across multiple trials on different devices of the
+same type. Any observed deviations from the values reported were within approximately 20 seconds. Based on the
+time for 1,000 steps and the prediction horizon, we extrapolate to estimate the approximate length of a trajectory that
+TrajCast can generate for each system within one day.
+Interestingly, the generation of the the trajectory for the molecule comprising 20 atoms only is on the same order of
+magnitude as smallest quartz and water systems being almost one order of magnitude larger. Besides potential GPU
+inefficiencies at this small system sizes, this may also stem from angular momentum conservation, which is incorporated
+only into the MPNN trained for the gas-phase molecule. Future work could explore this by training a model on a
+peptide or protein in vacuum. The deviations between quartz and water, conversely, originate from the different cut-offs
+of 4.5 Å and 6.0 Å, respectively. Due to the large prediction horizon for quartz, TrajCast can generate nearly 20 ns of
+trajectory for over 4,000 atoms, while for water, it achieves just over 1 ns per day for a system of about 5,000 atoms.
+We note, however, that these values are merely rough guidelines and were obtained under testing environments avoiding
+GPU-to-CPU transfers and disk writing.
+Table S2: Computational efficiency of forecasting across chemical systems and sizes. These benchmarks were
+obtained by generating 1,000 steps of a trajectory in the NVT ensemble. To purely estimate the inference time, no
+intermittent atomic configurations were saved. Forecasts for the largest supercells of quartz and water were performed
+on a NVIDIA A100-SXM4-40GB GPU, while all other systems were assessed on a NVIDIA V100-SXM2-32GB GPU.
+System Supercell Natoms Prediction horizon ∆t [fs] Time per 1,000 steps [s] Length per day [ns]
+Paracetamol 1 × 1 × 1 20 7.0 57.65 10.49
+Quartz
+1 × 1 × 1 162
+30.0
+53.75 48.22
+2 × 2 × 2 1,296 75.16 34.49
+3 × 3 × 3 4,374 145.68 17.79
+Water
+1 × 1 × 1 192
+5.0
+62.02 6.97
+2 × 2 × 2 1,536 162.85 2.65
+3 × 3 × 3 5,184 371.38 1.16
+S6

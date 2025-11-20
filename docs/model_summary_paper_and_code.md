@@ -154,3 +154,42 @@
 - Stored RMS targets and neighbor statistics tie training/inference units together, preventing train/serve skew.
 - YAML-driven `FlexibleModel` and tensor-product modules make it easy to prototype new architectures while staying within the TrajCast toolchain.
 
+## 14. Paper-Replicating Runs (commands)
+- **Datasets** (repeat for `water`, `quartz`; add `--overwrite` to refresh):
+```bash
+python scripts/download_datasets.py --dataset paracetamol
+```
+- **Train — Paracetamol (Δt=7 fs)**:
+```bash
+python scripts/train_trajcast.py --system paracetamol --data-root data/paracetamol \
+  --edge-cutoff 4.0 --num-hidden-channels 64 --num-mp-layers 4 --max-rotation-order 2 \
+  --precision 64 --batch-size 10 --num-epochs 1500 --learning-rate 0.01 --max-grad-norm 0.5 \
+  --vel-max 0.14 --o3-backend cueq --run-dir runs/paper/paracetamol
+```
+- **Train — Quartz (Δt=30 fs)**:
+```bash
+python scripts/train_trajcast.py --system quartz --data-root data/quartz \
+  --edge-cutoff 4.5 --num-hidden-channels 64 --num-mp-layers 4 --max-rotation-order 2 \
+  --precision 64 --batch-size 2 --num-epochs 1500 --learning-rate 0.01 --max-grad-norm 0.5 \
+  --vel-max 0.035 --o3-backend cueq --run-dir runs/paper/quartz
+```
+- **Train — Water (Δt=5 fs)**:
+```bash
+python scripts/train_trajcast.py --system water --data-root data/water \
+  --edge-cutoff 6.0 --num-hidden-channels 64 --num-mp-layers 4 --max-rotation-order 2 \
+  --precision 64 --batch-size 2 --num-epochs 1500 --learning-rate 0.01 --max-grad-norm 0.5 \
+  --vel-max 0.14 --o3-backend cueq --run-dir runs/paper/water
+```
+- **Smoke test (minutes, CPU)**:
+```bash
+python scripts/download_datasets.py --dataset example
+python scripts/train_trajcast.py --system example --num-epochs 2 --batch-size 2 --precision 32 \
+  --run-dir runs/smoke/example --device cpu --no-wandb
+```
+- **Pretrained inference** (pick system files from `ibm-research/trajcast.models-arxiv2025`):
+```bash
+# download config_e3nn.yaml and state_dict_e3nn.pt for your system
+# then open examples/inference/forecasting.ipynb and set:
+#   MODEL_KEY  -> path to state_dict_e3nn.pt
+#   CONFIG_KEY -> path to your starting .extxyz
+```

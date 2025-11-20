@@ -28,6 +28,8 @@ dependencies = [
     "pyyaml >= 6.0.0",
     "torch-nl >= 0.3",
     "huggingface-hub >= 0.29.0",
+    "tqdm >= 4.66",
+    "wandb >= 0.18",
 ]
 
 [project.optional-dependencies]

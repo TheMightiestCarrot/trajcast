@@ -133,3 +133,5 @@ events*
 *.pt
 log*
 *extxyz
+
+runs/

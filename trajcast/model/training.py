@@ -1,13 +1,15 @@
 import glob
 import logging
 import os
+import sys
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
 import yaml
 from torch_geometric.loader import DataLoader
+from tqdm.auto import tqdm
 
 from trajcast.data._keys import (
     DISPLACEMENTS_KEY,
@@ -57,7 +59,9 @@ class Trainer:
         "chained_scheduler_hp",
         "checkpoint_settings",
         "tensorboard_settings",
+        "use_tensorboard",
         "model_type",
+        "wandb",
     ]
 
     def __init__(self, config: Dict):
@@ -75,6 +79,10 @@ class Trainer:
         self.target_field = train_config.get("target_field")
         self.batch_size = train_config.get("batch_size")
         self.num_epochs = train_config.get("num_epochs")
+        self._tqdm_disable = not sys.stderr.isatty()
+        self.wandb_run = None
+        self.wandb_enabled = False
+        self.use_tensorboard = train_config.get("use_tensorboard", True)
 
         if "precision" in self.config["model"]:
             assert self.config["model"]["precision"] in [64, 32]
@@ -215,17 +223,16 @@ class Trainer:
         # scheduler
 
         # Check whether tensorboard is available
-        if train_config.get("tensorboard_settings"):
-            self.tensorboard = TensorBoard(
-                settings=train_config.get("tensorboard_settings")
-            )
+        self.tensorboard = None
+        self.tensorboard_settings = train_config.get("tensorboard_settings")
+        if self.use_tensorboard and self.tensorboard_settings:
+            self.tensorboard = TensorBoard(settings=self.tensorboard_settings)
             self.tensorboard.loss_function = self.loss_function
             self.tensorboard.target_field = self.target_field
             self.tensorboard.reference_fields = self.reference_fields
             self.tensorboard.dimensions = self.output_dimensions
 
-        else:
-            print("Please provide tensorboard settings with path to validation set.")
+        self._init_wandb(train_config)
 
     @classmethod
     def build_from_yaml(cls, filename: str):
@@ -270,11 +277,176 @@ class Trainer:
 
         logger.addHandler(fiha)
 
-    def _train_epoch(self, train_loader: DataLoader):
+    def _init_wandb(self, train_config: Dict) -> None:
+        wandb_settings = train_config.get("wandb", {}) or {}
+        if not wandb_settings.get("enabled", False):
+            return
+
+        try:
+            import wandb  # type: ignore
+        except ImportError as exc:  # pragma: no cover - defensive
+            raise ImportError(
+                "wandb logging requested but the package is not installed. Install via `pip install wandb`."
+            ) from exc
+
+        project_name = wandb_settings.get("project") or self.config["data"].get(
+            "name", "trajcast"
+        )
+        run_name = wandb_settings.get("run_name") or self.config.get("model", {}).get(
+            "model_type", "trajcast"
+        )
+        wandb_dir = wandb_settings.get("dir") or os.path.join(os.getcwd(), "wandb")
+        os.makedirs(wandb_dir, exist_ok=True)
+
+        self.wandb_run = wandb.init(
+            project=project_name,
+            entity=wandb_settings.get("entity"),
+            name=run_name,
+            dir=wandb_dir,
+            config=self._build_wandb_config_snapshot(),
+            reinit=True,
+        )
+        self.wandb_enabled = self.wandb_run is not None
+
+    def _build_wandb_config_snapshot(self) -> Dict[str, Any]:
+        # Keep the config logger-friendly; strip WandB-specific keys to avoid recursion
+        training_copy = {
+            k: v
+            for k, v in self.config.get("training", {}).items()
+            if k not in {"wandb"}
+        }
+        training_copy.update(
+            {
+                "batch_size": self.batch_size,
+                "num_epochs": self.num_epochs,
+                "device": str(self.device),
+            }
+        )
+
+        return {
+            "model": self.config.get("model", {}),
+            "data": self.config.get("data", {}),
+            "training": training_copy,
+        }
+
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.detach().item()
+        try:
+            return float(value)
+        except (TypeError, ValueError):  # pragma: no cover - safety net
+            return None
+
+    def _log_wandb_metrics(
+        self,
+        *,
+        epoch: int,
+        loss_train,
+        loss_val,
+        maes_train: Dict,
+        lr,
+    ) -> None:
+        if not self.wandb_enabled:
+            return
+
+        metrics = {
+            "epoch": epoch,
+            "loss/train": self._to_float(loss_train),
+            "lr": self._to_float(lr),
+        }
+
+        val_loss_value = self._to_float(loss_val)
+        if val_loss_value is not None:
+            metrics["loss/val"] = val_loss_value
+
+        if maes_train:
+            if DISPLACEMENTS_KEY in maes_train:
+                metrics["mae/train/displacements"] = self._to_float(
+                    maes_train[DISPLACEMENTS_KEY]
+                )
+            if UPDATE_VELOCITIES_KEY in maes_train:
+                metrics["mae/train/update_velocities"] = self._to_float(
+                    maes_train[UPDATE_VELOCITIES_KEY]
+                )
+
+        if self.wandb_run:
+            self.wandb_run.log(metrics, step=epoch)
+
+    def _finish_wandb(self, best_loss) -> None:
+        if not self.wandb_enabled or self.wandb_run is None:
+            return
+
+        best_loss_value = self._to_float(best_loss)
+        if best_loss_value is not None:
+            self.wandb_run.summary["best_val_loss"] = best_loss_value
+        self.wandb_run.finish()
+
+    def _compute_validation_loss(self):
+        """Compute validation loss/MAEs without TensorBoard logging for WandB-only runs."""
+        if not self.tensorboard_settings:
+            return None
+
+        val_cfg = self.tensorboard_settings.get("loss_validation") or {}
+        data_args = val_cfg.get("data")
+        if not data_args:
+            return None
+
+        batch_size = val_cfg.get("batch_size", 1)
+        validation_set = AtomicGraphDataset(**data_args)
+        val_loader = DataLoader(validation_set, batch_size=batch_size, shuffle=True)
+
+        loss = 0.0
+        total_size = 0
+        mae_disp = 0.0
+        mae_vel = 0.0
+
+        self.model.eval()
+        with torch.no_grad():
+            for val_batch in val_loader:
+                val_batch = self.model(val_batch.to(self.device))
+                predictions = val_batch[self.target_field]
+                reference = (
+                    val_batch[self.reference_fields]
+                    if isinstance(self.reference_fields, str)
+                    else torch.hstack([val_batch[field] for field in self.reference_fields])
+                )
+
+                loss_batch = self.loss_function(predictions, reference)
+                loss += loss_batch.detach() * val_batch.size(0)
+
+                err_disp, err_vel = torch.split(
+                    (predictions - reference).abs(), self.output_dimensions, dim=1
+                )
+                mae_disp += err_disp.mean().detach() * val_batch.num_nodes
+                mae_vel += err_vel.mean().detach() * val_batch.num_nodes
+                total_size += val_batch.size(0)
+
+        if total_size == 0:
+            return None
+
+        loss /= total_size
+        mae_disp /= total_size
+        mae_vel /= total_size
+
+        return loss
+
+    def _train_epoch(self, train_loader: DataLoader, epoch_index: int):
         running_loss = 0.0
         mae_disp = 0.0
         mae_vel = 0.0
-        for data_batch in train_loader:
+
+        progress = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch_index + 1}/{self.num_epochs}",
+            dynamic_ncols=True,
+            leave=False,
+            disable=self._tqdm_disable,
+        )
+
+        for data_batch in progress:
             # Forward pass
 
             data_batch = self.model(data_batch.to(self.device))
@@ -296,8 +468,11 @@ class Trainer:
                 (predictions - reference).abs(), self.output_dimensions, dim=1
             )
 
-            mae_disp += err_disp.mean() * data_batch.size(0)
-            mae_vel += err_vel.mean() * data_batch.size(0)
+            batch_mae_disp = err_disp.mean().detach()
+            batch_mae_vel = err_vel.mean().detach()
+
+            mae_disp += batch_mae_disp * data_batch.size(0)
+            mae_vel += batch_mae_vel * data_batch.size(0)
 
             # Backward pass and update weights
             self.optimizer.zero_grad()
@@ -316,6 +491,12 @@ class Trainer:
             # Compute and accumluate loss
             running_loss += loss.detach() * data_batch.size(0)
 
+            progress.set_postfix(
+                loss=f"{loss.detach().item():.4f}",
+                mae_disp=f"{batch_mae_disp.item():.3e}",
+                mae_vel=f"{batch_mae_vel.item():.3e}",
+            )
+
         epoch_loss = running_loss / train_loader.dataset.num_nodes
         # store maes in dictionary
         maes = {}
@@ -325,7 +506,10 @@ class Trainer:
 
     def train(self):
         # setup the logger
-        log_dir = os.path.join(os.path.dirname(self.tensorboard.log_dir), "logs")
+        if self.tensorboard:
+            log_dir = os.path.join(os.path.dirname(self.tensorboard.log_dir), "logs")
+        else:
+            log_dir = os.path.join(os.getcwd(), "logs")
 
         self.create_logger(directory=log_dir)
         logging.info("You are using TrajCast.")
@@ -402,6 +586,15 @@ class Trainer:
         logging.info(f"Number of model parameters: {n_params}")
         logging.info("Started training.")
 
+        if self.wandb_enabled and self.wandb_run:
+            self.wandb_run.config.update(
+                {
+                    "num_parameters": n_params,
+                    "train_dataset_size": len(self.dataset),
+                },
+                allow_val_change=True,
+            )
+
         # initialise the checkpoint handler
         checkpoint_handler = CheckpointHandler(
             directory=self.checkpoint_settings["root"],
@@ -435,24 +628,35 @@ class Trainer:
 
         while epoch < self.num_epochs:
 
-            loss_train, maes_train = self._train_epoch(data_loader)
+            loss_train, maes_train = self._train_epoch(data_loader, epoch)
 
             if lr_scheduler is not None:
                 lr_rate = lr_scheduler.return_lr(self.optimizer)
             else:
                 lr_rate = self.config["training"].get("optimizer_settings")["lr"]
 
-            loss_val = self.tensorboard.update(
-                epoch=epoch,
-                loss=loss_train.item(),
-                model=self.model,
-                lr=lr_rate,
-                maes=maes_train,
-            )
+            if self.use_tensorboard and self.tensorboard:
+                loss_val = self.tensorboard.update(
+                    epoch=epoch,
+                    loss=loss_train.item(),
+                    model=self.model,
+                    lr=lr_rate,
+                    maes=maes_train,
+                )
+            else:
+                loss_val = self._compute_validation_loss()
 
             # if scheduler is set update learning rate
             if lr_scheduler:
                 lr_scheduler.step(loss_val)
+
+            self._log_wandb_metrics(
+                epoch=epoch,
+                loss_train=loss_train,
+                loss_val=loss_val,
+                maes_train=maes_train,
+                lr=lr_rate,
+            )
 
             # report loss
             logging.info(
@@ -501,3 +705,4 @@ class Trainer:
         path_to_model = os.path.join(os.path.dirname(log_dir), "model_params.pt")
         torch.save(self.model.state_dict(), path_to_model)
         logging.info(f"Final model saved to {path_to_model}.")
+        self._finish_wandb(best_loss)

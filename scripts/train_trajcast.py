@@ -68,6 +68,47 @@ def parse_args() -> argparse.Namespace:
         help="Root directory for checkpoints, logs, and TensorBoard (default: runs/<system>).",
     )
     parser.add_argument(
+        "--run-name",
+        default="trajcast",
+        help="Name for this training run (used for WandB run name).",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default=None,
+        help="Weights & Biases project name (defaults to the selected system/dataset).",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default=None,
+        help="Weights & Biases entity/organization (optional).",
+    )
+    parser.add_argument(
+        "--wandb",
+        dest="use_wandb",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-wandb",
+        dest="use_wandb",
+        action="store_false",
+        help="Disable Weights & Biases logging.",
+    )
+    parser.set_defaults(use_wandb=True)
+    parser.add_argument(
+        "--tensorboard",
+        dest="use_tensorboard",
+        action="store_true",
+        help="Enable TensorBoard logging (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-tensorboard",
+        dest="use_tensorboard",
+        action="store_false",
+        help="Disable TensorBoard logging.",
+    )
+    parser.set_defaults(use_tensorboard=True)
+    parser.add_argument(
         "--seed",
         type=int,
         default=1705,
@@ -280,6 +321,14 @@ def build_training_config(
         },
         "checkpoint_settings": {
             "root": str(run_dir / "checkpoints"),
+        },
+        "use_tensorboard": args.use_tensorboard,
+        "wandb": {
+            "enabled": args.use_wandb,
+            "project": args.wandb_project or args.system,
+            "entity": args.wandb_entity,
+            "run_name": args.run_name,
+            "dir": str(run_dir / "wandb"),
         },
         "tensorboard_settings": tensorboard_settings,
     }
