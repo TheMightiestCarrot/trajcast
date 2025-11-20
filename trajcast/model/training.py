@@ -450,13 +450,16 @@ class Trainer:
         self.model.eval()
         with torch.no_grad():
             for val_batch in val_loader:
-                val_batch = self.model(val_batch.to(self.device))
-                predictions = val_batch[self.target_field]
+                val_batch = val_batch.to(self.device)
                 reference = (
-                    val_batch[self.reference_fields]
+                    val_batch[self.reference_fields].clone()
                     if isinstance(self.reference_fields, str)
-                    else torch.hstack([val_batch[field] for field in self.reference_fields])
+                    else torch.hstack(
+                        [val_batch[field] for field in self.reference_fields]
+                    ).clone()
                 )
+                val_batch = self.model(val_batch)
+                predictions = val_batch[self.target_field]
 
                 loss_batch = self.loss_function(predictions, reference)
                 loss += loss_batch.detach() * val_batch.size(0)
@@ -515,17 +518,17 @@ class Trainer:
 
         for data_batch in progress:
             # Forward pass
-
-            data_batch = self.model(data_batch.to(self.device))
-
-            predictions = data_batch[self.target_field]
+            data_batch = data_batch.to(self.device)
             reference = (
-                data_batch[self.reference_fields]
+                data_batch[self.reference_fields].clone()
                 if isinstance(self.reference_fields, str)
                 else torch.hstack(
                     [data_batch[field] for field in self.reference_fields]
-                )
+                ).clone()
             )
+            data_batch = self.model(data_batch)
+
+            predictions = data_batch[self.target_field]
 
             # compute loss
             loss = self.loss_function(predictions, reference)

@@ -157,17 +157,17 @@ class TensorBoard:
         model.eval()
         with torch.no_grad():
             for val_batch in val_loader:
-                val_batch = model(val_batch.to(self.device))
-                predictions = val_batch[self.target_field]
-
-                # format reference
+                val_batch = val_batch.to(self.device)
+                # Preserve ground truth before the model overwrites the fields
                 reference = (
-                    val_batch[self.reference_fields]
+                    val_batch[self.reference_fields].clone()
                     if isinstance(self.reference_fields, str)
                     else torch.hstack(
                         [val_batch[field] for field in self.reference_fields]
-                    )
+                    ).clone()
                 )
+                val_batch = model(val_batch)
+                predictions = val_batch[self.target_field]
                 # compute loss
                 loss_batch = self.loss_function(predictions, reference)
                 loss += loss_batch.detach() * val_batch.size(0)

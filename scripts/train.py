@@ -76,8 +76,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--run-name",
-        default="trajcast",
-        help="Name for this training run (used for WandB run name).",
+        default=None,
+        help="Name for this training run (used for WandB run name). Defaults to the model type or dataset name.",
     )
     parser.add_argument(
         "--wandb-project",
@@ -205,6 +205,61 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Maximum irrep order for equivariant features.",
     )
+    # PaiNN stabilization knobs
+    parser.add_argument(
+        "--residual-scale-interaction",
+        type=float,
+        default=None,
+        help="PaiNN interaction block residual scaling (default: model default 1.0).",
+    )
+    parser.add_argument(
+        "--residual-scale-mixing",
+        type=float,
+        default=None,
+        help="PaiNN mixing block residual scaling (default: model default 1.0).",
+    )
+    parser.add_argument(
+        "--tanh-message-scale",
+        type=float,
+        default=None,
+        help="PaiNN tanh message scaling factor.",
+    )
+    parser.add_argument(
+        "--tanh-mixing-scale",
+        type=float,
+        default=None,
+        help="PaiNN tanh mixing scaling factor.",
+    )
+    parser.add_argument(
+        "--filter-gain",
+        type=float,
+        default=None,
+        help="PaiNN filter gain multiplier (default: model default 1.0).",
+    )
+    parser.add_argument(
+        "--clip-vector-msg-norm",
+        type=float,
+        default=None,
+        help="Clip norm for PaiNN vector messages.",
+    )
+    parser.add_argument(
+        "--clip-scalar-msg-value",
+        type=float,
+        default=None,
+        help="Clip value for PaiNN scalar messages.",
+    )
+    parser.add_argument(
+        "--clip-mu-norm",
+        type=float,
+        default=None,
+        help="Clip norm for PaiNN mu vectors.",
+    )
+    parser.add_argument(
+        "--clip-q-value",
+        type=float,
+        default=None,
+        help="Clip value for PaiNN q scalars.",
+    )
     parser.add_argument(
         "--model-type",
         choices=("Flexible", "TrajCast", "EfficientTrajCastModel", "PaiNN"),
@@ -242,7 +297,7 @@ def build_model_config(
 ) -> Dict:
     mlp_width = args.mlp_width
     mlp_layers = [mlp_width, mlp_width, mlp_width]
-    return {
+    cfg = {
         "precision": args.precision,
         "num_chem_elements": len(atom_type_mapper),
         "edge_cutoff": edge_cutoff,
@@ -270,6 +325,22 @@ def build_model_config(
         "net_lin_mom": [0.0, 0.0, 0.0],
         "net_ang_mom": [0.0, 0.0, 0.0],
     }
+    # Optional PaiNN-specific stabilisation knobs
+    optional_fields = {
+        "residual_scale_interaction": args.residual_scale_interaction,
+        "residual_scale_mixing": args.residual_scale_mixing,
+        "tanh_message_scale": args.tanh_message_scale,
+        "tanh_mixing_scale": args.tanh_mixing_scale,
+        "filter_gain": args.filter_gain,
+        "clip_vector_msg_norm": args.clip_vector_msg_norm,
+        "clip_scalar_msg_value": args.clip_scalar_msg_value,
+        "clip_mu_norm": args.clip_mu_norm,
+        "clip_q_value": args.clip_q_value,
+    }
+    for key, val in optional_fields.items():
+        if val is not None:
+            cfg[key] = val
+    return cfg
 
 
 def build_data_config(
@@ -383,6 +454,11 @@ def main() -> None:
 
     data_root = args.data_root or Path("data") / args.system
     data_root = data_root.resolve()
+    dataset_name = data_root.name
+
+    # Derive sensible defaults from the provided arguments
+    args.run_name = args.run_name or args.model_type or dataset_name or "trajcast"
+    args.wandb_project = args.wandb_project or dataset_name
     train_file = data_root / args.train_file
     val_file = data_root / args.val_file
 
@@ -391,7 +467,7 @@ def main() -> None:
     if not val_file.exists():
         raise FileNotFoundError(f"Validation file not found: {val_file}")
 
-    run_dir = args.run_dir or Path("runs") / args.system
+    run_dir = args.run_dir or Path("runs") / dataset_name
     run_dir = run_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
