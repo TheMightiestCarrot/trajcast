@@ -36,6 +36,7 @@ from trajcast.model.forecast_tools import (
     init_velocity,
 )
 from trajcast.model.models import EfficientTrajCastModel, FlexibleModel, TrajCastModel
+from trajcast.model.painn import PaiNNModel
 from trajcast.nn.modules import ConservationLayer
 from trajcast.utils.atomic_computes import wrap_positions_back_to_box_torch
 from trajcast.utils.misc import (
@@ -84,6 +85,7 @@ class Forecast:
         "TrajCast": TrajCastModel,
         "Flexible": FlexibleModel,
         "EfficientTrajCast": EfficientTrajCastModel,
+        "PaiNN": PaiNNModel,
     }
 
     def __init__(self, protocol: Dict):

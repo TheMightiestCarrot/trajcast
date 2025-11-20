@@ -120,6 +120,7 @@
 - **TrajCastModel.** Canonical stack matching the paper.
 - **EfficientTrajCastModel.** Shares all math but aggressively reuses encoders and compresses irreps earlier for better memory/runtime trade-offs.
 - **FlexibleModel.** Consumes YAML layer lists so you can mix `MessagePassingLayer`, `ConditionedMessagePassingLayer`, custom encoders, normalization blocks, and conservation modules without code changes.
+- **PaiNNModel (new).** Lightweight equivariant baseline imported from the extended N-body benchmark. Select `model_type: PaiNN` in the training config to run it inside this pipeline; math notes live in `docs/painn_math.md`, and a starter config sits at `examples/configs/painn_local.yaml`.
 - **Forecast horizon conditioning.** `ForecastHorizonConditioning` adds sinusoidal timestep embeddings for time-aware rollouts or curriculum learning.
 - **Tensor norm encoders & new targets.** `TensorNormEncoding` generalizes radial encoders to arbitrary vector/tensor inputs, and additional targets only require specifying their irreps in `FIELD_IRREPS` plus data loading hooks.
 - **Backend toggles.** `o3_backend` can be `"e3nn"` or `"cueq"`; the config also exposes gating irreps, cutoff bases, and conservation toggles for rapid ablations.

@@ -20,6 +20,7 @@ from trajcast.data.dataset import AtomicGraphDataset
 from trajcast.model.checkpoint import CheckpointHandler, CheckpointState
 from trajcast.model.losses import MultiobjectiveLoss
 from trajcast.model.models import EfficientTrajCastModel, FlexibleModel, TrajCastModel
+from trajcast.model.painn import PaiNNModel
 from trajcast.model.utils import (
     CustomChainedScheduler,
     TensorBoard,
@@ -188,6 +189,12 @@ class Trainer:
                 predicted_fields=self.reference_fields,
                 rms_targets=rms,
                 mean_targets=means,
+            ).to(self.device)
+
+        elif model_type == "PaiNN":
+            self.model = PaiNNModel(
+                config=self.config["model"],
+                predicted_fields=self.reference_fields,
             ).to(self.device)
 
         else:

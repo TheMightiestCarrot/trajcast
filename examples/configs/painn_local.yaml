@@ -1,0 +1,34 @@
+# Minimal example configuration to train PaiNN inside the TrajCast pipeline.
+# Update the paths and the atom_type_mapper to match your local dataset.
+
+model:
+  # Hyperparameters for PaiNN
+  hidden_features: 128
+  num_layers: 6
+  num_rbf: 64
+  cutoff: 4.0  # should match data.cutoff_radius
+
+data:
+  root: data/local_md         # directory holding your split files
+  name: local_md               # used for caching the processed dataset
+  cutoff_radius: 4.0           # neighbor cutoff in Angstrom
+  files: train.extxyz          # training file under data.root
+  atom_type_mapper: {1: 0, 6: 1, 7: 2, 8: 3}  # map atomic numbers to contiguous ids
+  time_reversibility: false
+
+training:
+  model_type: PaiNN
+  target_field: target
+  reference_fields: [displacements, update_velocities]
+  batch_size: 8
+  num_epochs: 50
+  criterion: mse
+  optimizer: AdamW
+  optimizer_settings:
+    lr: 1.0e-3
+  max_grad_norm: 1.0
+  checkpoint_settings:
+    root: runs/painn_local/checkpoints
+  tensorboard_settings:
+    loss: true
+    log_dir: runs/painn_local/tensorboard
